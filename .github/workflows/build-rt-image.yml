@@ -57,9 +57,17 @@ jobs:
             USE_CCACHE=yes \
             CCACHE_DIR=$GITHUB_WORKSPACE/ccache
 
-      - name: 上传成品
+      - name: 上传成品镜像
         uses: actions/upload-artifact@v4
         with:
           name: armbian-trixie-rt-${{ github.run_number }}
           path: armbian/output/images/Armbian_*.img*
           retention-days: 90
+
+      - name: 上传完整日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-logs-${{ github.run_number }}
+          path: armbian/output/logs/
+          retention-days: 7
