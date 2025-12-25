@@ -1,4 +1,4 @@
-name: Build Armbian RT image
+name: Build Armbian RT image (trixie)
 
 on:
   push:
@@ -9,7 +9,7 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout repo (含补丁)
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: 安装依赖
@@ -18,10 +18,24 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             git curl wget unzip build-essential debhelper \
             crossbuild-essential-arm64 qemu-user-static ccache rsync \
-            libncurses5-dev flex bison libssl-dev bc dwarves python3-distutils xz-utils
+            libncurses5-dev flex bison libssl-dev bc dwarves python3-distutils xz-utils ca-certificates
 
       - name: 拉取 Armbian 源码
         run: git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git armbian
+
+      - name: 恢复 ccache
+        uses: actions/cache@v4
+        with:
+          path: ccache
+          key: armbian-ccache-${{ runner.os }}-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            armbian-ccache-${{ runner.os }}-${{ github.ref }}-
+            armbian-ccache-${{ runner.os }}-
+
+      - name: 放入用户补丁（跳过缺失包）
+        run: |
+          mkdir -p armbian/userpatches
+          cp lib.config armbian/userpatches/lib.config
 
       - name: 打入 RT 补丁
         run: |
@@ -46,6 +60,6 @@ jobs:
       - name: 上传成品
         uses: actions/upload-artifact@v4
         with:
-          name: armbian-rt-image-${{ github.run_number }}
+          name: armbian-trixie-rt-${{ github.run_number }}
           path: armbian/output/images/Armbian_*.img*
           retention-days: 90
