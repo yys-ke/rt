@@ -1,0 +1,51 @@
+name: Build Armbian RT image
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repo (含补丁)
+        uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            git curl wget unzip build-essential debhelper \
+            crossbuild-essential-arm64 qemu-user-static ccache rsync \
+            libncurses5-dev flex bison libssl-dev bc dwarves python3-distutils xz-utils
+
+      - name: 拉取 Armbian 源码
+        run: git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git armbian
+
+      - name: 打入 RT 补丁
+        run: |
+          mkdir -p armbian/userpatches/kernel/rockchip-rk3588-6.12
+          xz -d < patch-6.12.43-rt12.patch.xz > armbian/userpatches/kernel/rockchip-rk3588-6.12/rt12.patch
+
+      - name: 编译镜像
+        run: |
+          cd armbian
+          ./compile.sh \
+            BOARD=orangepi5-plus \
+            BRANCH=current \
+            RELEASE=trixie \
+            BUILD_MINIMAL=yes \
+            BUILD_DESKTOP=no \
+            KERNEL_CONFIGURE=no \
+            EXTRAWIFI=no \
+            COMPRESS_OUTPUTIMAGE=img,xz \
+            USE_CCACHE=yes \
+            CCACHE_DIR=$GITHUB_WORKSPACE/ccache
+
+      - name: 上传成品
+        uses: actions/upload-artifact@v4
+        with:
+          name: armbian-rt-image-${{ github.run_number }}
+          path: armbian/output/images/Armbian_*.img*
+          retention-days: 90
