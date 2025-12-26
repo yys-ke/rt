@@ -1,6 +1,6 @@
-name: Build RT kernel deb only
+name: Build RT kernel deb (any branch)
 
-on: push        # 任何分支都触发
+on: push        # 所有分支都触发
 
 jobs:
   kernel:
@@ -52,6 +52,8 @@ jobs:
             BUILD_IMAGE=no \
             KERNEL_ONLY=yes \
             KERNEL_CONFIGURE=no \
+            BUILD_DESKTOP=no \
+            BUILD_MINIMAL=yes \
             EXTRAWIFI=no \
             USE_CCACHE=yes \
             CCACHE_DIR=$GITHUB_WORKSPACE/ccache
