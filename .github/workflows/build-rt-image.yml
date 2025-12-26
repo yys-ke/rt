@@ -1,4 +1,4 @@
-name: Build RT Kernel (OrangePi 5 Plus) - Fix Git Clone & Checkout
+name: Build RT Kernel (OrangePi 5 Plus) - Full Branch Clone
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
       BOARD: orangepi5-plus
       BRANCH: current
       RELEASE: bookworm
-      # 核心修正：指定分支+提交+仓库地址
+      # 目标提交+分支+仓库
       KERNEL_BRANCH: linux-6.12.y
       KERNEL_COMMIT: 9becd7c25c61ae7e5b6fbfc3c226b1f23af7638c
       KERNEL_SOURCE: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
@@ -62,7 +62,7 @@ jobs:
           cd $ARMBIAN_DIR
           git submodule update --init --recursive
 
-          # 修改Armbian核心脚本，禁用缓存检测
+          # 禁用Armbian缓存检测
           sudo sed -i 's/artifact_is_available_in_remote_cache() {/artifact_is_available_in_remote_cache() { return 1;/g' $ARMBIAN_DIR/lib/functions/artifacts/artifacts-obtain.sh
           sudo sed -i 's/artifact_is_available_in_local_cache() {/artifact_is_available_in_local_cache() { return 1;/g' $ARMBIAN_DIR/lib/functions/artifacts/artifacts-obtain.sh
           echo "✅ 已修改Armbian核心脚本，禁用缓存检测"
@@ -70,17 +70,17 @@ jobs:
       - name: Prepare User Patches & Configs (Fix Path/Name)
         run: |
           set -e
-          # 修复RT补丁路径（符合Armbian规范）
+          # 修复RT补丁路径（rockchip64架构）
           PATCH_DIR=$ARMBIAN_DIR/userpatches/kernel/rockchip64-${{ env.KERNEL_VERSION }}
           mkdir -p $PATCH_DIR
           
-          # 核心RT配置
+          # 写入RT内核强制配置
           echo 'CONFIG_MODVERSIONS=n' > $ARMBIAN_DIR/userpatches/config-custom.conf
           echo 'CONFIG_PREEMPT_RT=y' >> $ARMBIAN_DIR/userpatches/config-custom.conf
           echo 'CONFIG_PREEMPT=y' >> $ARMBIAN_DIR/userpatches/config-custom.conf
           echo 'CONFIG_HZ_1000=y' >> $ARMBIAN_DIR/userpatches/config-custom.conf
           
-          # 解压RT补丁
+          # 解压RT补丁（确保根目录有patch-6.12.43-rt12.patch.xz）
           PATCH_FILE="patch-${{ env.KERNEL_VERSION }}-${{ env.RT_PATCH_VERSION }}.patch.xz"
           if [ ! -f $PATCH_FILE ]; then
             echo "❌ 补丁文件 $PATCH_FILE 不存在！"
@@ -100,7 +100,6 @@ jobs:
       - name: Clean All Caches (Ultra Deep)
         run: |
           set -e
-          # 深度清理所有缓存
           rm -rf $ARMBIAN_DIR/cache/* || true
           rm -rf $ARMBIAN_DIR/output/* || true
           rm -rf $ARMBIAN_DIR/sources/* || true
@@ -137,18 +136,18 @@ jobs:
           VERBOSE="yes"
           EOF
 
-      - name: Compile RT Kernel (Fix Git Clone & Checkout)
+      - name: Compile RT Kernel (Full Branch Clone + Force Checkout)
         run: |
           set -e
           cd $ARMBIAN_DIR
 
-          # ========== 核心修复：指定分支+深度克隆+验证提交 ==========
+          # ========== 核心修复：完整克隆linux-6.12.y分支 ==========
           mkdir -p sources/linux-${{ env.KERNEL_VERSION }}
-          # 1. 克隆指定分支，深度100（确保包含目标提交）
-          git clone --branch ${{ env.KERNEL_BRANCH }} --depth=100 ${{ env.KERNEL_SOURCE }} sources/linux-${{ env.KERNEL_VERSION }}
+          # 去掉--depth参数，完整克隆目标分支
+          git clone --branch ${{ env.KERNEL_BRANCH }} ${{ env.KERNEL_SOURCE }} sources/linux-${{ env.KERNEL_VERSION }}
           cd sources/linux-${{ env.KERNEL_VERSION }}
           
-          # 2. 验证提交是否存在
+          # 验证提交是否存在
           echo "===== 验证提交 ${{ env.KERNEL_COMMIT }} 是否存在 ====="
           if git cat-file -e ${{ env.KERNEL_COMMIT }} 2>/dev/null; then
             echo "✅ 提交 ${{ env.KERNEL_COMMIT }} 存在，开始切换"
@@ -156,8 +155,8 @@ jobs:
             echo "✅ 已成功切换到提交：${{ env.KERNEL_COMMIT }}"
           else
             echo "❌ 提交 ${{ env.KERNEL_COMMIT }} 不存在于 ${{ env.KERNEL_BRANCH }} 分支！"
-            echo "===== 分支最近5个提交 ====="
-            git log --oneline -5
+            echo "===== 分支所有提交（前20条） ====="
+            git log --oneline -20
             exit 1
           fi
           cd $ARMBIAN_DIR
