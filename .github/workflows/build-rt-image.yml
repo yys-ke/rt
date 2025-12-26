@@ -1,8 +1,7 @@
-name: Build RT Kernel (OrangePi 5 Plus) - Fix YAML Syntax
-
+name: Build RT Kernel for OrangePi 5 Plus
 on:
   push:
-    branches: ['*']
+    branches: [ main ]
   workflow_dispatch:
 
 concurrency:
@@ -14,7 +13,6 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: read
-      actions: read
     env:
       ARMBIAN_DIR: ${{ github.workspace }}/armbian
       BOARD: orangepi5-plus
@@ -23,123 +21,76 @@ jobs:
       KERNEL_BRANCH: linux-6.12.y
       KERNEL_COMMIT: 9becd7c25c61ae7e5b6fbfc3c226b1f23af7638c
       KERNEL_SOURCE: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
-      USERPATCHES_ID: rt
-      RT_PATCH_VERSION: rt12
-      KERNEL_VERSION: 6.12.43
-      DOCKER_UID: 1001
-      DOCKER_GID: 1001
+      RT_PATCH_VER: rt12
+      KERNEL_VER: 6.12.43
 
     steps:
-      - name: Checkout Local Repository
+      - name: Checkout Repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Initialize System Environment
+      - name: Install Dependencies
         run: |
-          set -e
-          sudo apt-get update -qq
-          sudo apt-get remove -y --purge containerd.io docker-ce docker-ce-cli || true
-          sudo apt-get autoremove -y -qq || true
-          sudo apt-get install -y --no-install-recommends \
-            git curl wget unzip build-essential debhelper \
-            crossbuild-essential-arm64 qemu-user-static rsync \
-            libncurses5-dev flex bison libssl-dev bc dwarves python3-distutils \
-            xz-utils ca-certificates kmod cpio libelf-dev dpkg-dev
-          
-          if ! command -v docker &> /dev/null; then
-            curl -fsSL https://get.docker.com -o get-docker.sh
-            sudo sh get-docker.sh --mirror Aliyun
-            sudo systemctl start docker
-            sudo systemctl enable docker
-          fi
-          sudo usermod -aG docker $USER
-          newgrp docker
+          sudo apt update && sudo apt install -y git curl wget unzip build-essential crossbuild-essential-arm64 qemu-user-static rsync libncurses5-dev flex bison libssl-dev bc dwarves python3-distutils xz-utils ca-certificates kmod cpio libelf-dev dpkg-dev docker.io
+          sudo usermod -aG docker $USER && newgrp docker
 
-      - name: Pull Armbian Build Framework
+      - name: Clone Armbian Build Framework
         run: |
-          set -e
           git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git $ARMBIAN_DIR
-          cd $ARMBIAN_DIR
-          git submodule update --init --recursive
-
-          sudo sed -i 's/artifact_is_available_in_remote_cache() {/artifact_is_available_in_remote_cache() { return 1;/g' $ARMBIAN_DIR/lib/functions/artifacts/artifacts-obtain.sh
-          sudo sed -i 's/artifact_is_available_in_local_cache() {/artifact_is_available_in_local_cache() { return 1;/g' $ARMBIAN_DIR/lib/functions/artifacts/artifacts-obtain.sh
+          cd $ARMBIAN_DIR && git submodule update --init --recursive
+          # 禁用缓存检测
+          sudo sed -i 's/artifact_is_available_in_remote_cache() {/artifact_is_available_in_remote_cache() { return 1;/g' lib/functions/artifacts/artifacts-obtain.sh
+          sudo sed -i 's/artifact_is_available_in_local_cache() {/artifact_is_available_in_local_cache() { return 1;/g' lib/functions/artifacts/artifacts-obtain.sh
           sudo chown -R $USER:$USER $ARMBIAN_DIR
-          echo "✅ 已修改Armbian核心脚本+修复权限"
 
-      - name: Prepare User Patches & Configs (Fix Path/Name)
+      - name: Prepare RT Patch & Config
         run: |
-          set -e
-          PATCH_DIR=$ARMBIAN_DIR/userpatches/kernel/rockchip64-${{ env.KERNEL_VERSION }}
+          # 创建补丁目录
+          PATCH_DIR=$ARMBIAN_DIR/userpatches/kernel/rockchip64-${{ env.KERNEL_VER }}
           mkdir -p $PATCH_DIR
-          
-          echo 'CONFIG_MODVERSIONS=n' > $ARMBIAN_DIR/userpatches/config-custom.conf
-          echo 'CONFIG_PREEMPT_RT=y' >> $ARMBIAN_DIR/userpatches/config-custom.conf
-          echo 'CONFIG_PREEMPT=y' >> $ARMBIAN_DIR/userpatches/config-custom.conf
-          echo 'CONFIG_HZ_1000=y' >> $ARMBIAN_DIR/userpatches/config-custom.conf
-          
-          PATCH_FILE="patch-${{ env.KERNEL_VERSION }}-${{ env.RT_PATCH_VERSION }}.patch.xz"
+          # 写入RT内核配置
+          cat > $ARMBIAN_DIR/userpatches/config-custom.conf << EOF
+          CONFIG_MODVERSIONS=n
+          CONFIG_PREEMPT_RT=y
+          CONFIG_PREEMPT=y
+          CONFIG_HZ_1000=y
+          EOF
+          # 解压RT补丁（确保根目录有 patch-6.12.43-rt12.patch.xz）
+          PATCH_FILE=patch-${{ env.KERNEL_VER }}-${{ env.RT_PATCH_VER }}.patch.xz
           if [ ! -f $PATCH_FILE ]; then
-            echo "❌ 补丁文件 $PATCH_FILE 不存在！"
-            exit 1
+            echo "ERROR: Patch file $PATCH_FILE not found!" && exit 1
           fi
-          xz -d < $PATCH_FILE > $PATCH_DIR/0001-${{ env.RT_PATCH_VERSION }}.patch
-          
-          if [ -f $PATCH_DIR/0001-${{ env.RT_PATCH_VERSION }}.patch ]; then
-            echo "✅ RT补丁已放入正确路径：$PATCH_DIR"
-            sudo chown -R $USER:$USER $ARMBIAN_DIR/userpatches
-          else
-            echo "❌ RT补丁解压失败！"
-            exit 1
-          fi
+          xz -d < $PATCH_FILE > $PATCH_DIR/0001-${{ env.RT_PATCH_VER }}.patch
+          sudo chown -R $USER:$USER $ARMBIAN_DIR/userpatches
 
-      - name: Clean All Caches (Ultra Deep)
+      - name: Configure Armbian Build
         run: |
-          set -e
-          rm -rf $ARMBIAN_DIR/cache/* || true
-          rm -rf $ARMBIAN_DIR/output/* || true
-          rm -rf $ARMBIAN_DIR/sources/* || true
-          rm -rf $ARMBIAN_DIR/tmp/* || true
-          sudo rm -rf /armbian/* || true
-          docker system prune -af || true
-          rm -rf $ARMBIAN_DIR/.cache/* || true
-          echo "✅ 深度清理所有缓存完成"
-
-      - name: Write Core Config (No KERNEL_CONFIGURE)
-        run: |
-          set -e
           cat > $ARMBIAN_DIR/userpatches/config.conf << EOF
-          BOARD="${{ env.BOARD }}"
-          BRANCH="${{ env.BRANCH }}"
-          RELEASE="${{ env.RELEASE }}"
-          KERNEL_GIT="${{ env.KERNEL_COMMIT }}"
-          KERNEL_SOURCE="${{ env.KERNEL_SOURCE }}"
-          KERNEL_BRANCH="${{ env.KERNEL_BRANCH }}"
-          KERNEL_CACHE="no"
-          USERPATCHES_ID="${{ env.USERPATCHES_ID }}"
-          ARMBIAN_CACHE_MODE="none"
-          SKIP_REMOTE_CACHE="yes"
-          SKIP_LOCAL_CACHE="yes"
-          FORCE_REBUILD="yes"
-          USE_CCACHE="no"
-          CONFIG_CUSTOM="$ARMBIAN_DIR/userpatches/config-custom.conf"
-          CUSTOM_HASH="rt-kernel-$(date +%s)"
-          NONINTERACTIVE="yes"
-          VERBOSE="yes"
-          DOCKER_UID="${{ env.DOCKER_UID }}"
-          DOCKER_GID="${{ env.DOCKER_GID }}"
+          BOARD=${{ env.BOARD }}
+          BRANCH=${{ env.BRANCH }}
+          RELEASE=${{ env.RELEASE }}
+          KERNEL_GIT=${{ env.KERNEL_COMMIT }}
+          KERNEL_SOURCE=${{ env.KERNEL_SOURCE }}
+          KERNEL_BRANCH=${{ env.KERNEL_BRANCH }}
+          KERNEL_CACHE=no
+          ARMBIAN_CACHE_MODE=none
+          SKIP_REMOTE_CACHE=yes
+          SKIP_LOCAL_CACHE=yes
+          FORCE_REBUILD=yes
+          USE_CCACHE=no
+          CONFIG_CUSTOM=$ARMBIAN_DIR/userpatches/config-custom.conf
+          NONINTERACTIVE=yes
+          VERBOSE=yes
           EOF
 
-      - name: Clone Kernel Source (Optimized Deep + Sparse)
+      - name: Clone Linux Kernel Source
         run: |
-          set -e
-          cd $ARMBIAN_DIR
-          mkdir -p sources/linux-${{ env.KERNEL_VERSION }}
-          cd sources/linux-${{ env.KERNEL_VERSION }}
-          git init
-          git remote add origin ${{ env.KERNEL_SOURCE }}
+          cd $ARMBIAN_DIR && mkdir -p sources/linux-${{ env.KERNEL_VER }}
+          cd sources/linux-${{ env.KERNEL_VER }}
+          git init && git remote add origin ${{ env.KERNEL_SOURCE }}
           git config core.sparseCheckout true
+          # 只拉取必需目录
           cat > .git/info/sparse-checkout << EOF
           arch/
           block/
@@ -152,99 +103,42 @@ jobs:
           mm/
           net/
           scripts/
-          security/
-          sound/
-          tools/
-          usr/
-          virt/
           Makefile
           Kbuild
           Kconfig
           EOF
           git pull --depth=1000 origin ${{ env.KERNEL_BRANCH }}
-          
-          echo "===== 验证提交 ${{ env.KERNEL_COMMIT }} 是否存在 ====="
+          # 验证提交
           if git cat-file -e ${{ env.KERNEL_COMMIT }} 2>/dev/null; then
-            echo "✅ 提交 ${{ env.KERNEL_COMMIT }} 存在，开始切换"
             git checkout ${{ env.KERNEL_COMMIT }}
-            sudo chown -R $USER:$USER $ARMBIAN_DIR/sources
           else
-            echo "❌ 提交 ${{ env.KERNEL_COMMIT }} 不存在于 ${{ env.KERNEL_BRANCH }} 分支！"
-            echo "===== 分支最近20条提交 ====="
-            git log --oneline -20
-            exit 1
+            echo "ERROR: Commit ${{ env.KERNEL_COMMIT }} not found!" && exit 1
           fi
+          sudo chown -R $USER:$USER $ARMBIAN_DIR/sources
 
-      - name: Step 1 - Generate Kernel Config (New CLI: kernel-config)
+      - name: Generate Kernel Config (New CLI)
         run: |
-          set -e
           cd $ARMBIAN_DIR
           ./compile.sh kernel-config \
-            "BOARD=${{ env.BOARD }}" \
-            "BRANCH=${{ env.BRANCH }}" \
-            "RELEASE=${{ env.RELEASE }}" \
-            "KERNEL_GIT=${{ env.KERNEL_COMMIT }}" \
-            "CONFIG_CUSTOM=$ARMBIAN_DIR/userpatches/config-custom.conf" \
-            "NONINTERACTIVE=yes" \
-            "VERBOSE=yes"
-          echo "✅ 内核配置生成完成（新CLI语法）"
+            BOARD=${{ env.BOARD }} \
+            BRANCH=${{ env.BRANCH }} \
+            RELEASE=${{ env.RELEASE }} \
+            KERNEL_GIT=${{ env.KERNEL_COMMIT }} \
+            NONINTERACTIVE=yes
 
-      - name: Step 2 - Compile RT Kernel (New CLI: kernel)
+      - name: Compile RT Kernel
         run: |
-          set -e
           cd $ARMBIAN_DIR
           ./compile.sh kernel \
-            "BOARD=${{ env.BOARD }}" \
-            "BRANCH=${{ env.BRANCH }}" \
-            "RELEASE=${{ env.RELEASE }}" \
-            "KERNEL_GIT=${{ env.KERNEL_COMMIT }}" \
-            "KERNEL_SOURCE=${{ env.KERNEL_SOURCE }}" \
-            "KERNEL_BRANCH=${{ env.KERNEL_BRANCH }}" \
-            "KERNEL_CACHE=no" \
-            "USERPATCHES_ID=${{ env.USERPATCHES_ID }}" \
-            "ARMBIAN_CACHE_MODE=none" \
-            "SKIP_REMOTE_CACHE=yes" \
-            "SKIP_LOCAL_CACHE=yes" \
-            "FORCE_REBUILD=yes" \
-            "USE_CCACHE=no" \
-            "CONFIG_CUSTOM=$ARMBIAN_DIR/userpatches/config-custom.conf" \
-            "CUSTOM_HASH=rt-kernel-$(date +%s)" \
-            "NONINTERACTIVE=yes" \
-            "VERBOSE=yes" \
-            "DOCKER_UID=${{ env.DOCKER_UID }}" \
-            "DOCKER_GID=${{ env.DOCKER_GID }}"
+            BOARD=${{ env.BOARD }} \
+            BRANCH=${{ env.BRANCH }} \
+            RELEASE=${{ env.RELEASE }} \
+            KERNEL_GIT=${{ env.KERNEL_COMMIT }} \
+            NONINTERACTIVE=yes
 
-      - name: Verify Compiled Artifacts
-        run: |
-          set -e
-          DEB_FILES=$ARMBIAN_DIR/output/debs/*.deb
-          if [ -z "$(ls $DEB_FILES 2>/dev/null)" ]; then
-            echo "❌ 未生成deb包！"
-            cat $ARMBIAN_DIR/output/logs/*.log || true
-            exit 1
-          fi
-          echo "===== 生成的RT内核deb包 ====="
-          ls -lh $DEB_FILES
-          if ! dpkg -I $DEB_FILES | grep -qi "rt" && ! ls $DEB_FILES | grep -qi "rt"; then
-            echo "❌ deb包无RT标识！"
-            exit 1
-          fi
-          echo "✅ RT内核编译成功！"
-
-      - name: Upload RT Kernel Deb Packages
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: rt-kernel-${{ env.BOARD }}-${{ env.KERNEL_VERSION }}-${{ env.RT_PATCH_VERSION }}-${{ github.run_number }}
+          name: rt-kernel-${{ env.BOARD }}-${{ env.KERNEL_VER }}
           path: ${{ env.ARMBIAN_DIR }}/output/debs/*.deb
-          retention-days: 90
-          if-no-files-found: error
-
-      - name: Upload Build Logs (On Failure)
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rt-kernel-logs-${{ env.BOARD }}-${{ github.run_number }}
-          path: |
-            ${{ env.ARMBIAN_DIR }}/output/logs/
-            ${{ env.ARMBIAN_DIR }}/userpatches/
-          retention-days: 14
+          retention-days: 7
