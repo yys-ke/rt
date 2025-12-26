@@ -1,4 +1,4 @@
-name: Build Armbian RT image (trixie)
+name: Build RT kernel deb only
 
 on:
   push:
@@ -6,16 +6,11 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  kernel:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
-      - name: 最大化可用空间
-        run: |
-          # 官方脚本：删 runner 预装软件，可空出 ~20 GB
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
 
       - name: 安装依赖
         run: |
@@ -28,19 +23,21 @@ jobs:
       - name: 拉取 Armbian 源码
         run: git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git armbian
 
-      - name: 恢复 ccache（限 1 GB）
+      - name: 恢复 ccache
         uses: actions/cache@v4
         with:
           path: ccache
-          key: armbian-ccache-${{ runner.os }}-${{ github.ref }}-${{ github.sha }}
+          key: kernel-ccache-${{ runner.os }}-${{ github.ref }}-${{ github.sha }}
           restore-keys: |
-            armbian-ccache-${{ runner.os }}-${{ github.ref }}-
-            armbian-ccache-${{ runner.os }}-
+            kernel-ccache-${{ runner.os }}-${{ github.ref }}-
+            kernel-ccache-${{ runner.os }}-
 
       - name: 放入用户补丁
         run: |
           mkdir -p armbian/userpatches
+          # 1. 跳过 trixie 缺失包
           cp lib.config armbian/userpatches/lib.config
+          # 2. 关闭 MODVERSIONS，避免 RT 模块链接失败
           echo 'CONFIG_MODVERSIONS=n' >> armbian/userpatches/config-kernel.conf
 
       - name: 打入 RT 补丁
@@ -48,35 +45,30 @@ jobs:
           mkdir -p armbian/userpatches/kernel/rockchip-rk3588-6.12
           xz -d < patch-6.12.43-rt12.patch.xz > armbian/userpatches/kernel/rockchip-rk3588-6.12/rt12.patch
 
-      - name: 编译镜像
+      - name: 编译内核（仅 deb 包）
         run: |
           cd armbian
-          # 限制 ccache 大小 & 立即回收
-          export CCACHE_MAXSIZE=1G
-          ccache -M 1G && ccache -c
           ./compile.sh \
             BOARD=orangepi5-plus \
             BRANCH=current \
-            RELEASE=trixie \
-            BUILD_MINIMAL=yes \
-            BUILD_DESKTOP=no \
+            BUILD_IMAGE=no \
+            KERNEL_ONLY=yes \
             KERNEL_CONFIGURE=no \
             EXTRAWIFI=no \
-            COMPRESS_OUTPUTIMAGE=img,xz \
             USE_CCACHE=yes \
             CCACHE_DIR=$GITHUB_WORKSPACE/ccache
 
-      - name: 上传成品镜像
+      - name: 上传内核 deb 包
         uses: actions/upload-artifact@v4
         with:
-          name: armbian-trixie-rt-${{ github.run_number }}
-          path: armbian/output/images/Armbian_*.img*
+          name: kernel-rt-debs-${{ github.run_number }}
+          path: armbian/output/debs/*.deb
           retention-days: 90
 
-      - name: 上传完整日志（失败时）
+      - name: 上传日志（失败时）
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: full-logs-${{ github.run_number }}
+          name: kernel-logs-${{ github.run_number }}
           path: armbian/output/logs/
           retention-days: 7
