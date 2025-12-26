@@ -161,7 +161,7 @@ jobs:
           fi
           cd $ARMBIAN_DIR
 
-      - name: Step 1 - Generate Kernel Config (New CLI: kernel-config)
+      - name: "Step 1 - Generate Kernel Config (New CLI: kernel-config)"
         run: |
           set -e
           cd $ARMBIAN_DIR
@@ -176,7 +176,7 @@ jobs:
             "VERBOSE=yes"
           echo "✅ 内核配置生成完成（新CLI语法）"
 
-      - name: Step 2 - Compile RT Kernel (New CLI: kernel)
+      - name: "Step 2 - Compile RT Kernel (New CLI: kernel)"
         run: |
           set -e
           cd $ARMBIAN_DIR
