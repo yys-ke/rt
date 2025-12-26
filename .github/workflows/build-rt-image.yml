@@ -1,12 +1,10 @@
 name: Build RT Kernel (OrangePi 5 Plus) - Force Rebuild
 
-# 触发条件：所有分支推送 + 手动触发（方便调试）
 on:
   push:
     branches: ['*']
   workflow_dispatch:
 
-# 全局配置：取消并行，指定运行器
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -17,11 +15,9 @@ jobs:
     permissions:
       contents: read
       actions: read
-    # 全局环境变量（集中管理，方便修改）
     env:
-      # 基础路径（移除CCACHE_DIR）
+      # 核心参数（固化，确保容器内可见）
       ARMBIAN_DIR: ${{ github.workspace }}/armbian
-      # 编译核心参数（仅需修改这里即可适配其他版本）
       BOARD: orangepi5-plus
       BRANCH: current
       RELEASE: bookworm
@@ -30,238 +26,146 @@ jobs:
       USERPATCHES_ID: rt
       RT_PATCH_VERSION: rt12
       KERNEL_VERSION: 6.12.43
+      # 新增：强制Docker传递参数的环境变量
+      ARMBIAN_BOARD: orangepi5-plus
+      ARMBIAN_BRANCH: current
+      ARMBIAN_RELEASE: bookworm
 
     steps:
-      ###########################################################################
-      # 步骤1：拉取本地代码（包含补丁/配置文件）
-      ###########################################################################
       - name: Checkout Local Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      ###########################################################################
-      # 步骤2：系统环境初始化（修复Docker冲突+安装全量依赖，移除ccache）
-      ###########################################################################
       - name: Initialize System Environment
         run: |
-          set -e  # 出错立即终止
-          echo "===== 更新系统包管理器 ====="
+          set -e
           sudo apt-get update -qq
-          sudo apt-get upgrade -y -qq
-
-          echo "===== 清理冲突的Docker包 ====="
           sudo apt-get remove -y --purge containerd.io docker-ce docker-ce-cli || true
           sudo apt-get autoremove -y -qq || true
-          sudo apt-get clean -qq || true
-
-          echo "===== 安装编译核心依赖（移除ccache） ====="
           sudo apt-get install -y --no-install-recommends \
             git curl wget unzip build-essential debhelper \
             crossbuild-essential-arm64 qemu-user-static rsync \
             libncurses5-dev flex bison libssl-dev bc dwarves python3-distutils \
             xz-utils ca-certificates kmod cpio libelf-dev dpkg-dev
-
-          echo "===== 安装兼容版Docker ====="
+          
           if ! command -v docker &> /dev/null; then
             curl -fsSL https://get.docker.com -o get-docker.sh
             sudo sh get-docker.sh --mirror Aliyun
             sudo systemctl start docker
             sudo systemctl enable docker
           fi
-
-          echo "===== 验证关键工具 ====="
-          docker --version
-          gcc --version
-          dpkg --version
-
-          echo "===== 配置Docker权限 ====="
           sudo usermod -aG docker $USER
           newgrp docker
 
-      ###########################################################################
-      # 步骤3：拉取Armbian编译框架（固定版本）
-      ###########################################################################
       - name: Pull Armbian Build Framework
         run: |
           set -e
-          echo "===== 克隆Armbian v25.08 ====="
           git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git $ARMBIAN_DIR
-
-          echo "===== 更新子模块 ====="
           cd $ARMBIAN_DIR
           git submodule update --init --recursive
 
-      ###########################################################################
-      # 步骤4：准备用户补丁和配置（RT核心定制）
-      ###########################################################################
       - name: Prepare User Patches & Configs
         run: |
           set -e
-          echo "===== 创建目录结构 ====="
           mkdir -p $ARMBIAN_DIR/userpatches
           mkdir -p $ARMBIAN_DIR/userpatches/kernel/rockchip-rk3588-${{ env.KERNEL_VERSION }}
-
-          echo "===== 复制自定义配置 ====="
-          # 1. lib.config（跳过trixie缺失包）
-          if [ -f lib.config ]; then
-            cp lib.config $ARMBIAN_DIR/userpatches/lib.config
-            echo "✅ lib.config 已复制"
-          else
-            echo "⚠️ lib.config 不存在，跳过"
-          fi
-
-          # 2. 关闭MODVERSIONS（RT必需）
+          
+          # 复制配置（RT核心）
           echo 'CONFIG_MODVERSIONS=n' > $ARMBIAN_DIR/userpatches/config-rt.conf
           echo 'CONFIG_PREEMPT_RT=y' >> $ARMBIAN_DIR/userpatches/config-rt.conf
           echo 'CONFIG_PREEMPT=y' >> $ARMBIAN_DIR/userpatches/config-rt.conf
-          echo "✅ RT内核配置已写入"
-
-          echo "===== 解压RT补丁 ====="
+          
+          # 解压RT补丁（验证文件存在）
           PATCH_FILE="patch-${{ env.KERNEL_VERSION }}-${{ env.RT_PATCH_VERSION }}.patch.xz"
           if [ ! -f $PATCH_FILE ]; then
             echo "❌ 补丁文件 $PATCH_FILE 不存在！"
             exit 1
           fi
           xz -d < $PATCH_FILE > $ARMBIAN_DIR/userpatches/kernel/rockchip-rk3588-${{ env.KERNEL_VERSION }}/${{ env.RT_PATCH_VERSION }}.patch
-
-          # 验证补丁
-          if [ -f $ARMBIAN_DIR/userpatches/kernel/rockchip-rk3588-${{ env.KERNEL_VERSION }}/${{ env.RT_PATCH_VERSION }}.patch ]; then
-            echo "✅ RT补丁解压成功"
-          else
-            echo "❌ RT补丁解压失败！"
-            exit 1
-          fi
-
-          echo "===== 设置权限 ====="
           chmod -R 755 $ARMBIAN_DIR/userpatches
 
-      ###########################################################################
-      # 步骤5：彻底清理缓存（核心！确保重新拉取内核）
-      ###########################################################################
-      - name: Clean All Caches (Critical!)
+      - name: Clean All Caches
         run: |
           set -e
-          echo "===== 清理Armbian全局缓存 ====="
           rm -rf $ARMBIAN_DIR/cache/* || true
           rm -rf $ARMBIAN_DIR/output/* || true
-          rm -rf $ARMBIAN_DIR/tmp/* || true
-
-          echo "===== 清理内核源码缓存 ====="
           rm -rf $ARMBIAN_DIR/sources/linux-* || true
-          sudo rm -rf /armbian/cache/sources/linux-* || true
-          sudo rm -rf /armbian/sources/linux-* || true
-
-          echo "===== 清理Docker容器缓存 ====="
           docker system prune -af || true
 
-          echo "✅ 所有缓存已清理完毕"
-
-      ###########################################################################
-      # 步骤6：写入强制编译配置（优先级最高，移除CCACHE相关）
-      ###########################################################################
-      - name: Write Force Rebuild Config
+      - name: Write Core Config (Critical for Docker)
         run: |
           set -e
-          echo "===== 写入userpatches/config.conf（最高优先级） ====="
+          # 写入核心配置文件（容器内优先读取）
           cat > $ARMBIAN_DIR/userpatches/config.conf << EOF
-          # 禁用所有缓存
+          # 强制锁定核心参数（容器内必读取）
+          BOARD="${{ env.BOARD }}"
+          BRANCH="${{ env.BRANCH }}"
+          RELEASE="${{ env.RELEASE }}"
+          KERNEL_GIT="${{ env.KERNEL_COMMIT }}"
+          KERNEL_SOURCE="${{ env.KERNEL_SOURCE }}"
+          KERNEL_CACHE="no"
+          USERPATCHES_ID="${{ env.USERPATCHES_ID }}"
+          # 禁用缓存+强制编译
           ARMBIAN_CACHE_MODE="none"
           SKIP_REMOTE_CACHE="yes"
           SKIP_LOCAL_CACHE="yes"
           FORCE_REBUILD="yes"
-          # 强制指定内核
-          KERNEL_SOURCE="${{ env.KERNEL_SOURCE }}"
-          KERNEL_GIT="${{ env.KERNEL_COMMIT }}"
-          KERNEL_CACHE="no"
-          # 基础配置
-          BOARD="${{ env.BOARD }}"
-          BRANCH="${{ env.BRANCH }}"
-          RELEASE="${{ env.RELEASE }}"
-          USERPATCHES_ID="${{ env.USERPATCHES_ID }}"
-          # 禁用CCACHE
           USE_CCACHE="no"
-          # CI适配
+          # 禁用Docker自动参数覆盖
+          PREFER_DOCKER="no"
+          ARMBIAN_RELAUNCHED="yes"
           NONINTERACTIVE="yes"
-          SKIP_LOG_ARCHIVE="yes"
           VERBOSE="yes"
           EOF
-          cat $ARMBIAN_DIR/userpatches/config.conf  # 打印验证
-          echo "✅ 强制编译配置已写入"
 
-      ###########################################################################
-      # 步骤7：强制编译RT内核（最终执行，移除CCACHE相关）
-      ###########################################################################
-      - name: Compile RT Kernel (Force Rebuild)
+      - name: Compile RT Kernel (Fix Parameter Passing)
         run: |
           set -e
-          echo "===== 进入Armbian目录 ====="
           cd $ARMBIAN_DIR
-
-          echo "===== 开始编译（强制拉取 ${{ env.KERNEL_COMMIT }}） ====="
+          # 核心修复：将所有参数写入命令行，并用引号包裹，确保Docker传递
           ./compile.sh kernel \
-            # 基础参数（与config.conf一致，双重保险）
-            BOARD=${{ env.BOARD }} \
-            BRANCH=${{ env.BRANCH }} \
-            RELEASE=${{ env.RELEASE }} \
-            KERNEL_GIT=${{ env.KERNEL_COMMIT }} \
-            KERNEL_SOURCE=${{ env.KERNEL_SOURCE }} \
-            KERNEL_CACHE=no \
-            KERNEL_CONFIGURE=no \
-            USERPATCHES_ID=${{ env.USERPATCHES_ID }} \
-            # 缓存禁用（双重保险）
-            ARMBIAN_CACHE_MODE=none \
-            SKIP_REMOTE_CACHE=yes \
-            SKIP_LOCAL_CACHE=yes \
-            FORCE_REBUILD=yes \
-            # 禁用CCACHE
-            USE_CCACHE=no \
-            # CI适配
-            NONINTERACTIVE=yes \
-            SKIP_LOG_ARCHIVE=yes \
-            SET_OWNER_TO_UID=$(id -u) \
-            VERBOSE=yes
+            "BOARD=${{ env.BOARD }}" \
+            "BRANCH=${{ env.BRANCH }}" \
+            "RELEASE=${{ env.RELEASE }}" \
+            "KERNEL_GIT=${{ env.KERNEL_COMMIT }}" \
+            "KERNEL_SOURCE=${{ env.KERNEL_SOURCE }}" \
+            "KERNEL_CACHE=no" \
+            "KERNEL_CONFIGURE=no" \
+            "USERPATCHES_ID=${{ env.USERPATCHES_ID }}" \
+            "ARMBIAN_CACHE_MODE=none" \
+            "SKIP_REMOTE_CACHE=yes" \
+            "SKIP_LOCAL_CACHE=yes" \
+            "FORCE_REBUILD=yes" \
+            "USE_CCACHE=no" \
+            "PREFER_DOCKER=no" \
+            "NONINTERACTIVE=yes" \
+            "VERBOSE=yes" \
+            "SET_OWNER_TO_UID=$(id -u)"
 
-      ###########################################################################
-      # 步骤8：验证编译产物（确保生成正确deb包）
-      ###########################################################################
       - name: Verify Compiled Artifacts
         run: |
           set -e
-          echo "===== 检查deb包是否生成 ====="
           DEB_FILES=$ARMBIAN_DIR/output/debs/*.deb
           if [ -z "$(ls $DEB_FILES 2>/dev/null)" ]; then
-            echo "❌ 未生成任何deb包！"
-            echo "===== 打印编译日志 ====="
+            echo "❌ 未生成deb包！"
             cat $ARMBIAN_DIR/output/logs/*.log || true
             exit 1
           fi
-
-          echo "===== 列出生成的deb包 ====="
           ls -lh $ARMBIAN_DIR/output/debs/
-
-          echo "===== 验证deb包包含RT标识 ====="
-          if ! ls $ARMBIAN_DIR/output/debs/*.deb | grep -qi "${{ env.RT_PATCH_VERSION }}"; then
-            echo "❌ deb包未包含RT标识！"
+          if ! ls $DEB_FILES | grep -qi "${{ env.RT_PATCH_VERSION }}"; then
+            echo "❌ deb包无RT标识！"
             exit 1
           fi
 
-          echo "✅ 产物验证通过"
-
-      ###########################################################################
-      # 步骤9：上传产物（最终结果）
-      ###########################################################################
       - name: Upload RT Kernel Deb Packages
         uses: actions/upload-artifact@v4
         with:
           name: rt-kernel-${{ env.BOARD }}-${{ env.KERNEL_VERSION }}-${{ env.RT_PATCH_VERSION }}-${{ github.run_number }}
           path: ${{ env.ARMBIAN_DIR }}/output/debs/*.deb
           retention-days: 90
-          if-no-files-found: error  # 无文件则报错
+          if-no-files-found: error
 
-      ###########################################################################
-      # 步骤10：上传日志（失败时调试）
-      ###########################################################################
       - name: Upload Build Logs (On Failure)
         if: failure()
         uses: actions/upload-artifact@v4
