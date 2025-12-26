@@ -1,6 +1,6 @@
-name: Build RT kernel deb (any branch)
+name: Build RT kernel deb only
 
-on: push        # ← 所有分支都触发
+on: push        # 任何分支都触发
 
 jobs:
   kernel:
@@ -32,7 +32,9 @@ jobs:
       - name: 放入用户补丁
         run: |
           mkdir -p armbian/userpatches
+          # 1. 跳过 trixie 缺失包
           cp lib.config armbian/userpatches/lib.config
+          # 2. 关闭 MODVERSIONS，避免 RT 模块链接失败
           echo 'CONFIG_MODVERSIONS=n' >> armbian/userpatches/config-kernel.conf
 
       - name: 打入 RT 补丁
@@ -46,6 +48,7 @@ jobs:
           ./compile.sh \
             BOARD=orangepi5-plus \
             BRANCH=current \
+            RELEASE=bookworm \
             BUILD_IMAGE=no \
             KERNEL_ONLY=yes \
             KERNEL_CONFIGURE=no \
