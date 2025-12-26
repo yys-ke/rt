@@ -5,9 +5,19 @@ on: push        # 任何分支都触发
 jobs:
   kernel:
     runs-on: ubuntu-22.04
+    # 增加构建权限和容器设置（适配Armbian Docker编译环境）
+    permissions:
+      contents: read
+    env:
+      # 全局环境变量，确保ccache路径生效
+      CCACHE_DIR: ${{ github.workspace }}/ccache
+      
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        # 确保拉取所有文件（包括补丁文件）
+        with:
+          fetch-depth: 1
 
       - name: 安装依赖
         run: |
@@ -16,9 +26,22 @@ jobs:
             git curl wget unzip build-essential debhelper \
             crossbuild-essential-arm64 qemu-user-static ccache rsync \
             libncurses5-dev flex bison libssl-dev bc dwarves python3-distutils xz-utils ca-certificates
+          # 额外安装Armbian构建可能需要的依赖
+          sudo apt-get install -y --no-install-recommends docker.io
 
       - name: 拉取 Armbian 源码
-        run: git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git armbian
+        run: |
+          git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git armbian
+          # 进入目录并更新子模块（避免编译时缺失依赖）
+          cd armbian
+          git submodule update --init --recursive
+
+      - name: 清理旧缓存（确保强制重新编译）
+        run: |
+          # 清空本地ccache缓存（可选，如需彻底重新编译则保留）
+          rm -rf ${{ env.CCACHE_DIR }}/*
+          # 清理Armbian可能残留的缓存文件
+          rm -rf armbian/output/{packages-hashed,debs}/*
 
       - name: 恢复 ccache（本地编译缓存）
         uses: actions/cache@v4
@@ -36,15 +59,28 @@ jobs:
           cp lib.config armbian/userpatches/lib.config
           # 2. 关闭 MODVERSIONS（避免 RT 模块链接失败）
           echo 'CONFIG_MODVERSIONS=n' > armbian/userpatches/config-rt.conf
+          # 确保补丁目录权限正确
+          chmod -R 755 armbian/userpatches
 
       - name: 打入 RT 补丁
         run: |
           mkdir -p armbian/userpatches/kernel/rockchip-rk3588-6.12
+          # 检查补丁文件是否存在，避免编译失败
+          if [ ! -f patch-6.12.43-rt12.patch.xz ]; then
+            echo "错误：RT补丁文件 patch-6.12.43-rt12.patch.xz 不存在！"
+            exit 1
+          fi
           xz -d < patch-6.12.43-rt12.patch.xz > armbian/userpatches/kernel/rockchip-rk3588-6.12/rt12.patch
+          # 验证补丁解压成功
+          if [ ! -f armbian/userpatches/kernel/rockchip-rk3588-6.12/rt12.patch ]; then
+            echo "错误：RT补丁解压失败！"
+            exit 1
+          fi
 
-      - name: 编译指定 stable commit RT 内核
+      - name: 编译指定 stable commit RT 内核（强制重新编译）
         run: |
           cd armbian
+          # 核心修改：添加强制重新编译的参数，禁用远程/本地缓存
           ./compile.sh kernel \
             BOARD=orangepi5-plus \
             BRANCH=current \
@@ -54,7 +90,29 @@ jobs:
             USERPATCHES_ID=rt \
             ARMBIAN_CACHE_MODE=none \
             USE_CCACHE=yes \
-            CCACHE_DIR=$GITHUB_WORKSPACE/ccache
+            CCACHE_DIR=${{ env.CCACHE_DIR }} \
+            # 新增：禁用远程缓存
+            SKIP_REMOTE_CACHE=yes \
+            # 新增：禁用本地缓存
+            SKIP_LOCAL_CACHE=yes \
+            # 新增：强制重新构建
+            FORCE_REBUILD=yes \
+            # 新增：禁用日志归档，加速构建
+            SKIP_LOG_ARCHIVE=yes \
+            # 新增：适配CI环境，非交互模式
+            NONINTERACTIVE=yes \
+            # 新增：设置产物所属用户，避免权限问题
+            SET_OWNER_TO_UID=$(id -u)
+
+      - name: 检查编译产物
+        run: |
+          # 验证deb包是否生成
+          if [ -z "$(ls armbian/output/debs/*.deb 2>/dev/null)" ]; then
+            echo "错误：未生成内核deb包！"
+            # 打印日志帮助调试
+            cat armbian/output/logs/*.log || true
+            exit 1
+          fi
 
       - name: 上传内核 deb 包
         uses: actions/upload-artifact@v4
