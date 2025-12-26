@@ -1,4 +1,4 @@
-name: Build RT Kernel (OrangePi 5 Plus) - Full Branch Clone
+name: Build RT Kernel (OrangePi 5 Plus) - Fix New CLI Syntax
 
 on:
   push:
@@ -20,13 +20,15 @@ jobs:
       BOARD: orangepi5-plus
       BRANCH: current
       RELEASE: bookworm
-      # 目标提交+分支+仓库
       KERNEL_BRANCH: linux-6.12.y
       KERNEL_COMMIT: 9becd7c25c61ae7e5b6fbfc3c226b1f23af7638c
       KERNEL_SOURCE: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
       USERPATCHES_ID: rt
       RT_PATCH_VERSION: rt12
       KERNEL_VERSION: 6.12.43
+      # 修复权限问题：指定容器内用户ID
+      DOCKER_UID: 1001
+      DOCKER_GID: 1001
 
     steps:
       - name: Checkout Local Repository
@@ -62,19 +64,21 @@ jobs:
           cd $ARMBIAN_DIR
           git submodule update --init --recursive
 
-          # 禁用Armbian缓存检测
+          # 1. 禁用Armbian缓存检测
           sudo sed -i 's/artifact_is_available_in_remote_cache() {/artifact_is_available_in_remote_cache() { return 1;/g' $ARMBIAN_DIR/lib/functions/artifacts/artifacts-obtain.sh
           sudo sed -i 's/artifact_is_available_in_local_cache() {/artifact_is_available_in_local_cache() { return 1;/g' $ARMBIAN_DIR/lib/functions/artifacts/artifacts-obtain.sh
-          echo "✅ 已修改Armbian核心脚本，禁用缓存检测"
+          # 2. 修复权限：添加当前用户到Armbian编译组
+          sudo chown -R $USER:$USER $ARMBIAN_DIR
+          echo "✅ 已修改Armbian核心脚本+修复权限"
 
       - name: Prepare User Patches & Configs (Fix Path/Name)
         run: |
           set -e
-          # 修复RT补丁路径（rockchip64架构）
+          # 修复RT补丁路径（rockchip64架构，Armbian规范路径）
           PATCH_DIR=$ARMBIAN_DIR/userpatches/kernel/rockchip64-${{ env.KERNEL_VERSION }}
           mkdir -p $PATCH_DIR
           
-          # 写入RT内核强制配置
+          # 写入RT内核强制配置（通过CONFIG_CUSTOM注入）
           echo 'CONFIG_MODVERSIONS=n' > $ARMBIAN_DIR/userpatches/config-custom.conf
           echo 'CONFIG_PREEMPT_RT=y' >> $ARMBIAN_DIR/userpatches/config-custom.conf
           echo 'CONFIG_PREEMPT=y' >> $ARMBIAN_DIR/userpatches/config-custom.conf
@@ -88,14 +92,14 @@ jobs:
           fi
           xz -d < $PATCH_FILE > $PATCH_DIR/0001-${{ env.RT_PATCH_VERSION }}.patch
           
-          # 验证补丁
+          # 验证补丁+修复权限
           if [ -f $PATCH_DIR/0001-${{ env.RT_PATCH_VERSION }}.patch ]; then
             echo "✅ RT补丁已放入正确路径：$PATCH_DIR"
+            sudo chown -R $USER:$USER $ARMBIAN_DIR/userpatches
           else
             echo "❌ RT补丁解压失败！"
             exit 1
           fi
-          chmod -R 755 $ARMBIAN_DIR/userpatches
 
       - name: Clean All Caches (Ultra Deep)
         run: |
@@ -109,11 +113,11 @@ jobs:
           rm -rf $ARMBIAN_DIR/.cache/* || true
           echo "✅ 深度清理所有缓存完成"
 
-      - name: Write Core Config (Force Kernel Checkout)
+      - name: Write Core Config (No KERNEL_CONFIGURE)
         run: |
           set -e
           cat > $ARMBIAN_DIR/userpatches/config.conf << EOF
-          # 强制核心参数
+          # 强制核心参数（移除 KERNEL_CONFIGURE=yes）
           BOARD="${{ env.BOARD }}"
           BRANCH="${{ env.BRANCH }}"
           RELEASE="${{ env.RELEASE }}"
@@ -128,40 +132,85 @@ jobs:
           SKIP_LOCAL_CACHE="yes"
           FORCE_REBUILD="yes"
           USE_CCACHE="no"
-          # 强制应用自定义配置
+          # 强制应用自定义RT配置（替代 KERNEL_CONFIGURE）
           CONFIG_CUSTOM="$ARMBIAN_DIR/userpatches/config-custom.conf"
           # 破坏缓存哈希
           CUSTOM_HASH="rt-kernel-$(date +%s)"
           NONINTERACTIVE="yes"
           VERBOSE="yes"
+          # 修复权限
+          DOCKER_UID="${{ env.DOCKER_UID }}"
+          DOCKER_GID="${{ env.DOCKER_GID }}"
           EOF
 
-      - name: Compile RT Kernel (Full Branch Clone + Force Checkout)
+      - name: Clone Kernel Source (Optimized Deep + Sparse)
         run: |
           set -e
           cd $ARMBIAN_DIR
-
-          # ========== 核心修复：完整克隆linux-6.12.y分支 ==========
+          # 优化克隆：深度1000+稀疏检出
           mkdir -p sources/linux-${{ env.KERNEL_VERSION }}
-          # 去掉--depth参数，完整克隆目标分支
-          git clone --branch ${{ env.KERNEL_BRANCH }} ${{ env.KERNEL_SOURCE }} sources/linux-${{ env.KERNEL_VERSION }}
           cd sources/linux-${{ env.KERNEL_VERSION }}
+          git init
+          git remote add origin ${{ env.KERNEL_SOURCE }}
+          git config core.sparseCheckout true
+          # 只拉取编译必需的目录
+          cat > .git/info/sparse-checkout << EOF
+          arch/
+          block/
+          crypto/
+          drivers/
+          fs/
+          include/
+          init/
+          kernel/
+          mm/
+          net/
+          scripts/
+          security/
+          sound/
+          tools/
+          usr/
+          virt/
+          Makefile
+          Kbuild
+          Kconfig
+          EOF
+          # 拉取目标分支的1000个提交
+          git pull --depth=1000 origin ${{ env.KERNEL_BRANCH }}
           
           # 验证提交是否存在
           echo "===== 验证提交 ${{ env.KERNEL_COMMIT }} 是否存在 ====="
           if git cat-file -e ${{ env.KERNEL_COMMIT }} 2>/dev/null; then
             echo "✅ 提交 ${{ env.KERNEL_COMMIT }} 存在，开始切换"
             git checkout ${{ env.KERNEL_COMMIT }}
-            echo "✅ 已成功切换到提交：${{ env.KERNEL_COMMIT }}"
+            sudo chown -R $USER:$USER $ARMBIAN_DIR/sources
           else
             echo "❌ 提交 ${{ env.KERNEL_COMMIT }} 不存在于 ${{ env.KERNEL_BRANCH }} 分支！"
-            echo "===== 分支所有提交（前20条） ====="
+            echo "===== 分支最近20条提交 ====="
             git log --oneline -20
             exit 1
           fi
-          cd $ARMBIAN_DIR
 
-          # 执行编译
+      - name: Step 1 - Generate Kernel Config (New CLI: kernel-config)
+        run: |
+          set -e
+          cd $ARMBIAN_DIR
+          # 新语法：先执行 kernel-config 生成配置（替代 KERNEL_CONFIGURE=yes）
+          ./compile.sh kernel-config \
+            "BOARD=${{ env.BOARD }}" \
+            "BRANCH=${{ env.BRANCH }}" \
+            "RELEASE=${{ env.RELEASE }}" \
+            "KERNEL_GIT=${{ env.KERNEL_COMMIT }}" \
+            "CONFIG_CUSTOM=$ARMBIAN_DIR/userpatches/config-custom.conf" \
+            "NONINTERACTIVE=yes" \
+            "VERBOSE=yes"
+          echo "✅ 内核配置生成完成（新CLI语法）"
+
+      - name: Step 2 - Compile RT Kernel (New CLI: kernel)
+        run: |
+          set -e
+          cd $ARMBIAN_DIR
+          # 新语法：再执行 kernel 命令编译内核
           ./compile.sh kernel \
             "BOARD=${{ env.BOARD }}" \
             "BRANCH=${{ env.BRANCH }}" \
@@ -170,7 +219,6 @@ jobs:
             "KERNEL_SOURCE=${{ env.KERNEL_SOURCE }}" \
             "KERNEL_BRANCH=${{ env.KERNEL_BRANCH }}" \
             "KERNEL_CACHE=no" \
-            "KERNEL_CONFIGURE=yes" \
             "USERPATCHES_ID=${{ env.USERPATCHES_ID }}" \
             "ARMBIAN_CACHE_MODE=none" \
             "SKIP_REMOTE_CACHE=yes" \
@@ -181,7 +229,8 @@ jobs:
             "CUSTOM_HASH=rt-kernel-$(date +%s)" \
             "NONINTERACTIVE=yes" \
             "VERBOSE=yes" \
-            "SET_OWNER_TO_UID=$(id -u)"
+            "DOCKER_UID=${{ env.DOCKER_UID }}" \
+            "DOCKER_GID=${{ env.DOCKER_GID }}"
 
       - name: Verify Compiled Artifacts
         run: |
@@ -192,14 +241,14 @@ jobs:
             cat $ARMBIAN_DIR/output/logs/*.log || true
             exit 1
           fi
-          echo "===== 生成的deb包 ====="
+          echo "===== 生成的RT内核deb包 ====="
           ls -lh $DEB_FILES
           # 验证RT标识
           if ! dpkg -I $DEB_FILES | grep -qi "rt" && ! ls $DEB_FILES | grep -qi "rt"; then
             echo "❌ deb包无RT标识！"
             exit 1
           fi
-          echo "✅ 产物验证通过（包含RT标识）"
+          echo "✅ RT内核编译成功！"
 
       - name: Upload RT Kernel Deb Packages
         uses: actions/upload-artifact@v4
