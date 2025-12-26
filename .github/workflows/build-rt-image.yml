@@ -136,7 +136,7 @@ jobs:
           VERBOSE="yes"
           EOF
 
-      - name: Compile RT Kernel (Full Branch Clone + Force Checkout)
+      - name: Clone Full Kernel Source (No Depth Limit)
         run: |
           set -e
           cd $ARMBIAN_DIR
@@ -161,7 +161,26 @@ jobs:
           fi
           cd $ARMBIAN_DIR
 
-          # 执行编译
+      - name: Step 1 - Generate Kernel Config (New CLI: kernel-config)
+        run: |
+          set -e
+          cd $ARMBIAN_DIR
+          # 新语法：先执行 kernel-config 生成配置，替代废弃的 KERNEL_CONFIGURE=yes
+          ./compile.sh kernel-config \
+            "BOARD=${{ env.BOARD }}" \
+            "BRANCH=${{ env.BRANCH }}" \
+            "RELEASE=${{ env.RELEASE }}" \
+            "KERNEL_GIT=${{ env.KERNEL_COMMIT }}" \
+            "CONFIG_CUSTOM=$ARMBIAN_DIR/userpatches/config-custom.conf" \
+            "NONINTERACTIVE=yes" \
+            "VERBOSE=yes"
+          echo "✅ 内核配置生成完成（新CLI语法）"
+
+      - name: Step 2 - Compile RT Kernel (New CLI: kernel)
+        run: |
+          set -e
+          cd $ARMBIAN_DIR
+          # 新语法：再执行 kernel 命令编译内核，删除 KERNEL_CONFIGURE=yes 参数
           ./compile.sh kernel \
             "BOARD=${{ env.BOARD }}" \
             "BRANCH=${{ env.BRANCH }}" \
@@ -170,7 +189,6 @@ jobs:
             "KERNEL_SOURCE=${{ env.KERNEL_SOURCE }}" \
             "KERNEL_BRANCH=${{ env.KERNEL_BRANCH }}" \
             "KERNEL_CACHE=no" \
-            "KERNEL_CONFIGURE=yes" \
             "USERPATCHES_ID=${{ env.USERPATCHES_ID }}" \
             "ARMBIAN_CACHE_MODE=none" \
             "SKIP_REMOTE_CACHE=yes" \
