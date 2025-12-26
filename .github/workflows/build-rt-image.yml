@@ -1,4 +1,4 @@
-name: Build 6.12.43 RT kernel deb (any branch)
+name: Build stable RT kernel deb (any branch)
 
 on: push        # 任何分支都触发
 
@@ -20,38 +20,37 @@ jobs:
       - name: 拉取 Armbian 源码
         run: git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git armbian
 
-      - name: 放入用户补丁（强制哈希变化）
+      - name: 恢复 ccache（本地编译缓存）
+        uses: actions/cache@v4
+        with:
+          path: ccache
+          key: kernel-ccache-${{ runner.os }}-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            kernel-ccache-${{ runner.os }}-${{ github.ref }}-
+            kernel-ccache-${{ runner.os }}-
+
+      - name: 放入用户补丁
         run: |
           mkdir -p armbian/userpatches
           # 1. 跳过 trixie 缺失包
           cp lib.config armbian/userpatches/lib.config
-          # 2. 关闭 MODVERSIONS（改名避开保留字）
+          # 2. 关闭 MODVERSIONS（避免 RT 模块链接失败）
           echo 'CONFIG_MODVERSIONS=n' > armbian/userpatches/config-rt.conf
-          # 3. 必过空补丁：改版权年份，强制官方源码哈希变化
-          printf '--- a/init/init_main.c\n+++ b/init/init_main.c\n@@ -1,4 +1,4 @@\n-// SPDX-License-Identifier: GPL-2.0-only\n+// SPDX-License-Identifier: GPL-2.0-or-later\n /*\n  *  linux/init/init_main.c\n  */\n' > armbian/userpatches/kernel/rockchip-rk3588-6.12/bump-hash.patch
 
       - name: 打入 RT 补丁
         run: |
           mkdir -p armbian/userpatches/kernel/rockchip-rk3588-6.12
           xz -d < patch-6.12.43-rt12.patch.xz > armbian/userpatches/kernel/rockchip-rk3588-6.12/rt12.patch
 
-      - name: 验证空补丁是否已应用
-        run: |
-          cd armbian
-          # 等待源码拉取完成（最多 5 分钟）
-          for i in {1..60}; do
-            [ -f cache/sources/linux-*/init/init_main.c ] && break || sleep 5
-          done
-          grep -F "GPL-2.0-or-later" cache/sources/linux-*/init/init_main.c && echo "✅ patch applied" || (echo "❌ patch missing"; exit 1)
-
-      - name: 编译 6.12.43 RT 内核
+      - name: 编译指定 stable commit RT 内核
         run: |
           cd armbian
           ./compile.sh kernel \
             BOARD=orangepi5-plus \
             BRANCH=current \
             RELEASE=bookworm \
-            KERNEL_CONFIGURE=prebuilt \
+            KERNEL_GIT=9becd7c25c61ae7e5b6fbfc3c226b1f23af7638c \
+            KERNEL_CONFIGURE=no \
             USERPATCHES_ID=rt \
             ARMBIAN_CACHE_MODE=none \
             USE_CCACHE=yes \
@@ -60,7 +59,7 @@ jobs:
       - name: 上传内核 deb 包
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-6.12.43-rt-debs-${{ github.ref_name }}-${{ github.run_number }}
+          name: kernel-stable-rt-debs-${{ github.ref_name }}-${{ github.run_number }}
           path: armbian/output/debs/*.deb
           retention-days: 90
 
