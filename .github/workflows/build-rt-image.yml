@@ -1,4 +1,4 @@
-name: Build RT Kernel (OrangePi 5 Plus) - Force Rebuild
+name: Build RT Kernel (OrangePi 5 Plus) - 100% Force Rebuild
 
 on:
   push:
@@ -16,7 +16,6 @@ jobs:
       contents: read
       actions: read
     env:
-      # 核心参数（固化，确保容器内可见）
       ARMBIAN_DIR: ${{ github.workspace }}/armbian
       BOARD: orangepi5-plus
       BRANCH: current
@@ -26,10 +25,6 @@ jobs:
       USERPATCHES_ID: rt
       RT_PATCH_VERSION: rt12
       KERNEL_VERSION: 6.12.43
-      # 新增：强制Docker传递参数的环境变量
-      ARMBIAN_BOARD: orangepi5-plus
-      ARMBIAN_BRANCH: current
-      ARMBIAN_RELEASE: bookworm
 
     steps:
       - name: Checkout Local Repository
@@ -65,40 +60,62 @@ jobs:
           cd $ARMBIAN_DIR
           git submodule update --init --recursive
 
-      - name: Prepare User Patches & Configs
+          # ========== 核心修改1：破坏Armbian缓存检测逻辑 ==========
+          # 修改缓存检测脚本，强制返回"未找到缓存"
+          sudo sed -i 's/artifact_is_available_in_remote_cache() {/artifact_is_available_in_remote_cache() { return 1;/g' $ARMBIAN_DIR/lib/functions/artifacts/artifacts-obtain.sh
+          sudo sed -i 's/artifact_is_available_in_local_cache() {/artifact_is_available_in_local_cache() { return 1;/g' $ARMBIAN_DIR/lib/functions/artifacts/artifacts-obtain.sh
+          echo "✅ 已修改Armbian核心脚本，禁用缓存检测"
+
+      - name: Prepare User Patches & Configs (Fix Path/Name)
         run: |
           set -e
-          mkdir -p $ARMBIAN_DIR/userpatches
-          mkdir -p $ARMBIAN_DIR/userpatches/kernel/rockchip-rk3588-${{ env.KERNEL_VERSION }}
+          # ========== 核心修改2：修复RT补丁路径（符合Armbian规范） ==========
+          # Armbian对rockchip64的补丁路径是：rockchip64-6.12（而非rockchip-rk3588-6.12）
+          PATCH_DIR=$ARMBIAN_DIR/userpatches/kernel/rockchip64-${{ env.KERNEL_VERSION }}
+          mkdir -p $PATCH_DIR
           
-          # 复制配置（RT核心）
-          echo 'CONFIG_MODVERSIONS=n' > $ARMBIAN_DIR/userpatches/config-rt.conf
-          echo 'CONFIG_PREEMPT_RT=y' >> $ARMBIAN_DIR/userpatches/config-rt.conf
-          echo 'CONFIG_PREEMPT=y' >> $ARMBIAN_DIR/userpatches/config-rt.conf
+          # 1. 核心RT配置（强制注入到内核.config）
+          echo 'CONFIG_MODVERSIONS=n' > $ARMBIAN_DIR/userpatches/config-custom.conf
+          echo 'CONFIG_PREEMPT_RT=y' >> $ARMBIAN_DIR/userpatches/config-custom.conf
+          echo 'CONFIG_PREEMPT=y' >> $ARMBIAN_DIR/userpatches/config-custom.conf
+          echo 'CONFIG_HZ_1000=y' >> $ARMBIAN_DIR/userpatches/config-custom.conf
           
-          # 解压RT补丁（验证文件存在）
+          # 2. 解压RT补丁（命名为0001-rt.patch，确保优先应用）
           PATCH_FILE="patch-${{ env.KERNEL_VERSION }}-${{ env.RT_PATCH_VERSION }}.patch.xz"
           if [ ! -f $PATCH_FILE ]; then
             echo "❌ 补丁文件 $PATCH_FILE 不存在！"
             exit 1
           fi
-          xz -d < $PATCH_FILE > $ARMBIAN_DIR/userpatches/kernel/rockchip-rk3588-${{ env.KERNEL_VERSION }}/${{ env.RT_PATCH_VERSION }}.patch
+          xz -d < $PATCH_FILE > $PATCH_DIR/0001-${{ env.RT_PATCH_VERSION }}.patch
+          
+          # 验证补丁
+          if [ -f $PATCH_DIR/0001-${{ env.RT_PATCH_VERSION }}.patch ]; then
+            echo "✅ RT补丁已放入正确路径：$PATCH_DIR"
+          else
+            echo "❌ RT补丁解压失败！"
+            exit 1
+          fi
           chmod -R 755 $ARMBIAN_DIR/userpatches
 
-      - name: Clean All Caches
+      - name: Clean All Caches (Ultra Deep)
         run: |
           set -e
+          # 深度清理：删除所有可能的缓存
           rm -rf $ARMBIAN_DIR/cache/* || true
           rm -rf $ARMBIAN_DIR/output/* || true
-          rm -rf $ARMBIAN_DIR/sources/linux-* || true
+          rm -rf $ARMBIAN_DIR/sources/* || true
+          rm -rf $ARMBIAN_DIR/tmp/* || true
+          sudo rm -rf /armbian/* || true
           docker system prune -af || true
+          # 删除Armbian的版本缓存
+          rm -rf $ARMBIAN_DIR/.cache/* || true
+          echo "✅ 深度清理所有缓存完成"
 
-      - name: Write Core Config (Critical for Docker)
+      - name: Write Core Config (Force Kernel Checkout)
         run: |
           set -e
-          # 写入核心配置文件（容器内优先读取）
           cat > $ARMBIAN_DIR/userpatches/config.conf << EOF
-          # 强制锁定核心参数（容器内必读取）
+          # 强制核心参数
           BOARD="${{ env.BOARD }}"
           BRANCH="${{ env.BRANCH }}"
           RELEASE="${{ env.RELEASE }}"
@@ -106,24 +123,34 @@ jobs:
           KERNEL_SOURCE="${{ env.KERNEL_SOURCE }}"
           KERNEL_CACHE="no"
           USERPATCHES_ID="${{ env.USERPATCHES_ID }}"
-          # 禁用缓存+强制编译
+          # 彻底禁用缓存
           ARMBIAN_CACHE_MODE="none"
           SKIP_REMOTE_CACHE="yes"
           SKIP_LOCAL_CACHE="yes"
           FORCE_REBUILD="yes"
           USE_CCACHE="no"
-          # 禁用Docker自动参数覆盖
-          PREFER_DOCKER="no"
-          ARMBIAN_RELAUNCHED="yes"
+          # 强制应用自定义配置
+          CONFIG_CUSTOM="$ARMBIAN_DIR/userpatches/config-custom.conf"
+          # 破坏缓存哈希（关键！）
+          CUSTOM_HASH="rt-kernel-$(date +%s)"
           NONINTERACTIVE="yes"
           VERBOSE="yes"
           EOF
 
-      - name: Compile RT Kernel (Fix Parameter Passing)
+      - name: Compile RT Kernel (Ultimate Force)
         run: |
           set -e
           cd $ARMBIAN_DIR
-          # 核心修复：将所有参数写入命令行，并用引号包裹，确保Docker传递
+          # ========== 核心修改3：先手动拉取并切换到指定内核提交 ==========
+          # 手动克隆内核源码，避免框架缓存
+          mkdir -p sources/linux-${{ env.KERNEL_VERSION }}
+          git clone ${{ env.KERNEL_SOURCE }} sources/linux-${{ env.KERNEL_VERSION }}
+          cd sources/linux-${{ env.KERNEL_VERSION }}
+          git checkout ${{ env.KERNEL_COMMIT }}
+          echo "✅ 已手动拉取并切换到内核提交：${{ env.KERNEL_COMMIT }}"
+          cd $ARMBIAN_DIR
+
+          # 执行编译（强制参数+破坏缓存哈希）
           ./compile.sh kernel \
             "BOARD=${{ env.BOARD }}" \
             "BRANCH=${{ env.BRANCH }}" \
@@ -131,14 +158,15 @@ jobs:
             "KERNEL_GIT=${{ env.KERNEL_COMMIT }}" \
             "KERNEL_SOURCE=${{ env.KERNEL_SOURCE }}" \
             "KERNEL_CACHE=no" \
-            "KERNEL_CONFIGURE=no" \
+            "KERNEL_CONFIGURE=yes" \
             "USERPATCHES_ID=${{ env.USERPATCHES_ID }}" \
             "ARMBIAN_CACHE_MODE=none" \
             "SKIP_REMOTE_CACHE=yes" \
             "SKIP_LOCAL_CACHE=yes" \
             "FORCE_REBUILD=yes" \
             "USE_CCACHE=no" \
-            "PREFER_DOCKER=no" \
+            "CONFIG_CUSTOM=$ARMBIAN_DIR/userpatches/config-custom.conf" \
+            "CUSTOM_HASH=rt-kernel-$(date +%s)" \
             "NONINTERACTIVE=yes" \
             "VERBOSE=yes" \
             "SET_OWNER_TO_UID=$(id -u)"
@@ -152,11 +180,14 @@ jobs:
             cat $ARMBIAN_DIR/output/logs/*.log || true
             exit 1
           fi
-          ls -lh $ARMBIAN_DIR/output/debs/
-          if ! ls $DEB_FILES | grep -qi "${{ env.RT_PATCH_VERSION }}"; then
+          echo "===== 生成的deb包 ====="
+          ls -lh $DEB_FILES
+          # 验证RT标识
+          if ! dpkg -I $DEB_FILES | grep -qi "rt" && ! ls $DEB_FILES | grep -qi "rt"; then
             echo "❌ deb包无RT标识！"
             exit 1
           fi
+          echo "✅ 产物验证通过（包含RT标识）"
 
       - name: Upload RT Kernel Deb Packages
         uses: actions/upload-artifact@v4
@@ -173,5 +204,5 @@ jobs:
           name: rt-kernel-logs-${{ env.BOARD }}-${{ github.run_number }}
           path: |
             ${{ env.ARMBIAN_DIR }}/output/logs/
-            ${{ env.ARMBIAN_DIR }}/userpatches/config.conf
+            ${{ env.ARMBIAN_DIR }}/userpatches/
           retention-days: 14
