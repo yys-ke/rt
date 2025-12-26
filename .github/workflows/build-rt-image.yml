@@ -29,31 +29,40 @@ jobs:
             kernel-ccache-${{ runner.os }}-${{ github.ref }}-
             kernel-ccache-${{ runner.os }}-
 
-      - name: 放入用户补丁
+      - name: 放入用户补丁（含空哈希变化）
         run: |
           mkdir -p armbian/userpatches
           # 1. 跳过 trixie 缺失包
           cp lib.config armbian/userpatches/lib.config
           # 2. 关闭 MODVERSIONS（改名避开保留字）
           echo 'CONFIG_MODVERSIONS=n' > armbian/userpatches/config-rt.conf
+          # 3. 空补丁：仅加一行注释，强制官方源码哈希变化 → 缓存键全新
+          cat > armbian/userpatches/kernel/rockchip-rk3588-6.12/bump-hash.patch <<'EOF'
+--- a/init/init_main.c
++++ b/init/init_main.c
+@@ -1,4 +1,5 @@
+ // SPDX-License-Identifier: GPL-2.0-only
++// Armbian cache-bump
+ /*
+  *  linux/init/init_main.c
+  */
+EOF
 
       - name: 打入 RT 补丁
         run: |
           mkdir -p armbian/userpatches/kernel/rockchip-rk3588-6.12
           xz -d < patch-6.12.43-rt12.patch.xz > armbian/userpatches/kernel/rockchip-rk3588-6.12/rt12.patch
 
-      - name: 编译 6.12.43 RT 内核（双缓存禁用 + 强制刷新）
+      - name: 编译 6.12.43 RT 内核（空补丁强制重编）
         run: |
           cd armbian
           ./compile.sh kernel \
             BOARD=orangepi5-plus \
             BRANCH=current \
             RELEASE=bookworm \
-            IGNORE_HASH=yes \
-            SKIP_ARMBIAN_REVISIONED_CACHE=yes \
-            ARMBIAN_CACHE_MODE=none \
             KERNEL_CONFIGURE=prebuilt \
             USERPATCHES_ID=rt \
+            ARMBIAN_CACHE_MODE=none \
             USE_CCACHE=yes \
             CCACHE_DIR=$GITHUB_WORKSPACE/ccache
 
