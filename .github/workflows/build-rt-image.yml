@@ -26,7 +26,6 @@ jobs:
       USERPATCHES_ID: rt
       RT_PATCH_VERSION: rt12
       KERNEL_VERSION: 6.12.43
-      # 分卷压缩包的前缀名
       SPLIT_TARBALL_PREFIX: linux-kernel.tar.gz.part-
 
     steps:
@@ -110,7 +109,7 @@ jobs:
           rm -rf $ARMBIAN_DIR/.cache/* || true
           echo "✅ 深度清理所有缓存完成"
 
-      - name: Write Core Config (Force Kernel Checkout)
+      - name: Write Core Config (Skip Remote Git Check)
         run: |
           set -e
           cat > $ARMBIAN_DIR/userpatches/config.conf << EOF
@@ -135,9 +134,10 @@ jobs:
           CUSTOM_HASH="rt-kernel-$(date +%s)"
           NONINTERACTIVE="yes"
           VERBOSE="yes"
+          # 关键配置：强制使用本地内核源码，跳过远程Git仓库检查
+          KERNEL_GIT_REPO_LOCAL="yes"
           EOF
 
-      # ========== 核心整合：分卷合并 + 解压内核 ==========
       - name: Merge Split Volumes & Unzip Kernel Source
         run: |
           set -e
