@@ -20,15 +20,6 @@ jobs:
       - name: 拉取 Armbian 源码
         run: git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git armbian
 
-      - name: 恢复 ccache（本地编译缓存）
-        uses: actions/cache@v4
-        with:
-          path: ccache
-          key: kernel-ccache-${{ runner.os }}-${{ github.ref }}-${{ github.sha }}
-          restore-keys: |
-            kernel-ccache-${{ runner.os }}-${{ github.ref }}-
-            kernel-ccache-${{ runner.os }}-
-
       - name: 放入用户补丁（强制哈希变化）
         run: |
           mkdir -p armbian/userpatches
