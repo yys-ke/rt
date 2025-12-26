@@ -1,7 +1,7 @@
 name: Build RT Kernel for OrangePi 5 Plus
 on:
   push:
-    branches: [ main ]
+    branches: [ '*' ]
   workflow_dispatch:
 
 concurrency:
