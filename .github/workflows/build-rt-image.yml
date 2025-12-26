@@ -80,3 +80,5 @@ EOF
           name: kernel-logs-${{ github.ref_name }}-${{ github.run_number }}
           path: armbian/output/logs/
           retention-days: 7
+
+          
