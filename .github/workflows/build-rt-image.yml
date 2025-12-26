@@ -47,9 +47,8 @@ jobs:
           cd armbian
           ./compile.sh kernel \
             BOARD=orangepi5-plus \
-            BRANCH=current \
+            BRANCH=6.12.43 \
             RELEASE=bookworm \
-            KERNEL_GIT=6.12.43 \
             KERNEL_CONFIGURE=prebuilt \
             USERPATCHES_ID=rt \
             ARMBIAN_CACHE_MODE=none \
