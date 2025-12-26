@@ -1,130 +1,210 @@
-name: Build stable RT kernel deb (any branch)
+name: Build stable RT kernel deb (OrangePi 5 Plus)
 
-on: push        # 任何分支都触发
+# 触发条件：任何分支推送代码时触发
+on: 
+  push:
+    branches: [ '*' ]  # 所有分支都触发
+  # 可选：添加手动触发（方便调试）
+  workflow_dispatch:
 
 jobs:
-  kernel:
+  build-rt-kernel:
     runs-on: ubuntu-22.04
-    # 增加构建权限和容器设置（适配Armbian Docker编译环境）
+    # 设置必要权限
     permissions:
       contents: read
+      actions: read
+    # 定义全局环境变量，统一路径
     env:
-      # 全局环境变量，确保ccache路径生效
       CCACHE_DIR: ${{ github.workspace }}/ccache
-      
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        # 确保拉取所有文件（包括补丁文件）
-        with:
-          fetch-depth: 1
+      ARMBIAN_DIR: ${{ github.workspace }}/armbian
+      BOARD: orangepi5-plus
+      BRANCH: current
+      RELEASE: bookworm
+      KERNEL_COMMIT: 9becd7c25c61ae7e5b6fbfc3c226b1f23af7638c
+      USERPATCHES_ID: rt
 
-      - name: 安装依赖
+    steps:
+      ###########################################################################
+      # 步骤1：拉取代码（包含你的补丁文件、配置文件）
+      ###########################################################################
+      - name: Checkout local repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1  # 仅拉取最新代码，加速
+
+      ###########################################################################
+      # 步骤2：系统环境准备 & 依赖安装（修复Docker冲突）
+      ###########################################################################
+      - name: Prepare system environment
         run: |
+          echo "===== 更新系统包列表 ====="
           sudo apt-get update -qq
+          
+          echo "===== 清理冲突的Docker包 ====="
+          sudo apt-get remove -y --purge containerd.io docker-ce docker-ce-cli || true
+          sudo apt-get autoremove -y || true
+          sudo apt-get clean || true
+          
+          echo "===== 安装核心编译依赖 ====="
           sudo apt-get install -y --no-install-recommends \
             git curl wget unzip build-essential debhelper \
             crossbuild-essential-arm64 qemu-user-static ccache rsync \
-            libncurses5-dev flex bison libssl-dev bc dwarves python3-distutils xz-utils ca-certificates
-          # 额外安装Armbian构建可能需要的依赖
-          sudo apt-get install -y --no-install-recommends docker.io
+            libncurses5-dev flex bison libssl-dev bc dwarves python3-distutils \
+            xz-utils ca-certificates kmod cpio libelf-dev
 
-      - name: 拉取 Armbian 源码
+          echo "===== 安装兼容版Docker（适配Armbian编译） ====="
+          if ! command -v docker &> /dev/null; then
+            curl -fsSL https://get.docker.com -o get-docker.sh
+            sudo sh get-docker.sh --mirror Aliyun
+            sudo systemctl start docker
+            sudo systemctl enable docker
+          fi
+          
+          echo "===== 验证关键工具 ====="
+          docker --version
+          ccache --version
+          gcc --version
+          
+          echo "===== 配置Docker权限 ====="
+          sudo usermod -aG docker $USER
+          newgrp docker
+
+      ###########################################################################
+      # 步骤3：拉取Armbian编译框架源码
+      ###########################################################################
+      - name: Pull Armbian build framework
         run: |
-          git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git armbian
-          # 进入目录并更新子模块（避免编译时缺失依赖）
-          cd armbian
+          echo "===== 克隆Armbian v25.08版本 ====="
+          git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git $ARMBIAN_DIR
+          
+          echo "===== 更新Armbian子模块 ====="
+          cd $ARMBIAN_DIR
           git submodule update --init --recursive
 
-      - name: 清理旧缓存（确保强制重新编译）
-        run: |
-          # 清空本地ccache缓存（可选，如需彻底重新编译则保留）
-          rm -rf ${{ env.CCACHE_DIR }}/*
-          # 清理Armbian可能残留的缓存文件
-          rm -rf armbian/output/{packages-hashed,debs}/*
-
-      - name: 恢复 ccache（本地编译缓存）
+      ###########################################################################
+      # 步骤4：CCache缓存恢复（加速编译）
+      ###########################################################################
+      - name: Restore CCACHE cache
         uses: actions/cache@v4
         with:
-          path: ccache
-          key: kernel-ccache-${{ runner.os }}-${{ github.ref }}-${{ github.sha }}
+          path: ${{ env.CCACHE_DIR }}
+          key: kernel-ccache-${{ runner.os }}-${{ env.BOARD }}-${{ github.sha }}
           restore-keys: |
-            kernel-ccache-${{ runner.os }}-${{ github.ref }}-
+            kernel-ccache-${{ runner.os }}-${{ env.BOARD }}-
             kernel-ccache-${{ runner.os }}-
 
-      - name: 放入用户补丁
+      ###########################################################################
+      # 步骤5：准备用户自定义配置 & 补丁
+      ###########################################################################
+      - name: Prepare user patches and configs
         run: |
-          mkdir -p armbian/userpatches
-          # 1. 跳过 trixie 缺失包
-          cp lib.config armbian/userpatches/lib.config
-          # 2. 关闭 MODVERSIONS（避免 RT 模块链接失败）
-          echo 'CONFIG_MODVERSIONS=n' > armbian/userpatches/config-rt.conf
-          # 确保补丁目录权限正确
-          chmod -R 755 armbian/userpatches
-
-      - name: 打入 RT 补丁
-        run: |
-          mkdir -p armbian/userpatches/kernel/rockchip-rk3588-6.12
-          # 检查补丁文件是否存在，避免编译失败
+          echo "===== 创建用户补丁目录 ====="
+          mkdir -p $ARMBIAN_DIR/userpatches
+          mkdir -p $ARMBIAN_DIR/userpatches/kernel/rockchip-rk3588-6.12
+          
+          echo "===== 复制自定义配置文件 ====="
+          # 1. 跳过trixie缺失包配置
+          if [ -f lib.config ]; then
+            cp lib.config $ARMBIAN_DIR/userpatches/lib.config
+          else
+            echo "警告：lib.config文件不存在，跳过复制"
+          fi
+          
+          # 2. 关闭MODVERSIONS（RT补丁必需）
+          echo 'CONFIG_MODVERSIONS=n' > $ARMBIAN_DIR/userpatches/config-rt.conf
+          
+          echo "===== 解压RT补丁 ====="
+          # 检查补丁文件是否存在
           if [ ! -f patch-6.12.43-rt12.patch.xz ]; then
             echo "错误：RT补丁文件 patch-6.12.43-rt12.patch.xz 不存在！"
             exit 1
           fi
-          xz -d < patch-6.12.43-rt12.patch.xz > armbian/userpatches/kernel/rockchip-rk3588-6.12/rt12.patch
-          # 验证补丁解压成功
-          if [ ! -f armbian/userpatches/kernel/rockchip-rk3588-6.12/rt12.patch ]; then
+          # 解压补丁到指定目录
+          xz -d < patch-6.12.43-rt12.patch.xz > $ARMBIAN_DIR/userpatches/kernel/rockchip-rk3588-6.12/rt12.patch
+          
+          echo "===== 验证补丁文件 ====="
+          if [ ! -f $ARMBIAN_DIR/userpatches/kernel/rockchip-rk3588-6.12/rt12.patch ]; then
             echo "错误：RT补丁解压失败！"
             exit 1
           fi
+          
+          echo "===== 设置目录权限 ====="
+          chmod -R 755 $ARMBIAN_DIR/userpatches
 
-      - name: 编译指定 stable commit RT 内核（强制重新编译）
+      ###########################################################################
+      # 步骤6：清理旧产物（避免缓存干扰）
+      ###########################################################################
+      - name: Clean old artifacts
         run: |
-          cd armbian
-          # 核心修改：添加强制重新编译的参数，禁用远程/本地缓存
+          echo "===== 清理旧的编译产物 ====="
+          rm -rf $ARMBIAN_DIR/output/{debs,packages-hashed}/* || true
+          rm -rf $ARMBIAN_DIR/tmp/* || true
+
+      ###########################################################################
+      # 步骤7：编译RT内核（强制重新编译，禁用缓存）
+      ###########################################################################
+      - name: Compile RT kernel (force rebuild)
+        run: |
+          echo "===== 进入Armbian编译目录 ====="
+          cd $ARMBIAN_DIR
+          
+          echo "===== 开始编译RT内核 ====="
           ./compile.sh kernel \
-            BOARD=orangepi5-plus \
-            BRANCH=current \
-            RELEASE=bookworm \
-            KERNEL_GIT=9becd7c25c61ae7e5b6fbfc3c226b1f23af7638c \
+            BOARD=${{ env.BOARD }} \
+            BRANCH=${{ env.BRANCH }} \
+            RELEASE=${{ env.RELEASE }} \
+            KERNEL_GIT=${{ env.KERNEL_COMMIT }} \
             KERNEL_CONFIGURE=no \
-            USERPATCHES_ID=rt \
+            USERPATCHES_ID=${{ env.USERPATCHES_ID }} \
             ARMBIAN_CACHE_MODE=none \
             USE_CCACHE=yes \
             CCACHE_DIR=${{ env.CCACHE_DIR }} \
-            # 新增：禁用远程缓存
+            # 核心：禁用所有缓存，强制重新编译
             SKIP_REMOTE_CACHE=yes \
-            # 新增：禁用本地缓存
             SKIP_LOCAL_CACHE=yes \
-            # 新增：强制重新构建
             FORCE_REBUILD=yes \
-            # 新增：禁用日志归档，加速构建
+            # CI环境适配
             SKIP_LOG_ARCHIVE=yes \
-            # 新增：适配CI环境，非交互模式
             NONINTERACTIVE=yes \
-            # 新增：设置产物所属用户，避免权限问题
-            SET_OWNER_TO_UID=$(id -u)
+            SET_OWNER_TO_UID=$(id -u) \
+            # 调试用：显示详细日志
+            VERBOSE=yes
 
-      - name: 检查编译产物
+      ###########################################################################
+      # 步骤8：验证编译产物
+      ###########################################################################
+      - name: Verify compiled artifacts
         run: |
-          # 验证deb包是否生成
-          if [ -z "$(ls armbian/output/debs/*.deb 2>/dev/null)" ]; then
+          echo "===== 检查deb包是否生成 ====="
+          DEB_FILES=$ARMBIAN_DIR/output/debs/*.deb
+          if [ -z "$(ls $DEB_FILES 2>/dev/null)" ]; then
             echo "错误：未生成内核deb包！"
-            # 打印日志帮助调试
-            cat armbian/output/logs/*.log || true
+            echo "===== 打印编译日志 ====="
+            cat $ARMBIAN_DIR/output/logs/*.log || true
             exit 1
           fi
+          
+          echo "===== 列出生成的deb包 ====="
+          ls -lh $ARMBIAN_DIR/output/debs/
 
-      - name: 上传内核 deb 包
+      ###########################################################################
+      # 步骤9：上传内核deb包（产物）
+      ###########################################################################
+      - name: Upload RT kernel deb packages
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-stable-rt-debs-${{ github.ref_name }}-${{ github.run_number }}
-          path: armbian/output/debs/*.deb
-          retention-days: 90
+          name: rt-kernel-debs-${{ env.BOARD }}-${{ env.RELEASE }}-${{ github.ref_name }}-${{ github.run_number }}
+          path: ${{ env.ARMBIAN_DIR }}/output/debs/*.deb
+          retention-days: 90  # 产物保留90天
 
-      - name: 上传日志（失败时）
+      ###########################################################################
+      # 步骤10：上传编译日志（失败时）
+      ###########################################################################
+      - name: Upload build logs (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-logs-${{ github.ref_name }}-${{ github.run_number }}
-          path: armbian/output/logs/
-          retention-days: 7
+          name: rt-kernel-logs-${{ env.BOARD }}-${{ github.run_number }}
+          path: ${{ env.ARMBIAN_DIR }}/output/logs/
+          retention-days: 7  # 日志保留7天
