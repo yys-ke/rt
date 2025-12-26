@@ -20,13 +20,14 @@ jobs:
       BOARD: orangepi5-plus
       BRANCH: current
       RELEASE: bookworm
-      # 目标提交+分支+仓库
       KERNEL_BRANCH: linux-6.12.y
       KERNEL_COMMIT: 9becd7c25c61ae7e5b6fbfc3c226b1f23af7638c
       KERNEL_SOURCE: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
       USERPATCHES_ID: rt
       RT_PATCH_VERSION: rt12
       KERNEL_VERSION: 6.12.43
+      # 分卷压缩包的前缀名
+      SPLIT_TARBALL_PREFIX: linux-kernel.tar.gz.part-
 
     steps:
       - name: Checkout Local Repository
@@ -136,30 +137,34 @@ jobs:
           VERBOSE="yes"
           EOF
 
-      - name: Clone Full Kernel Source (No Depth Limit)
+      # ========== 核心整合：分卷合并 + 解压内核 ==========
+      - name: Merge Split Volumes & Unzip Kernel Source
         run: |
           set -e
-          cd $ARMBIAN_DIR
-
-          # ========== 核心修复：完整克隆linux-6.12.y分支 ==========
-          mkdir -p sources/linux-${{ env.KERNEL_VERSION }}
-          # 去掉--depth参数，完整克隆目标分支
-          git clone --branch ${{ env.KERNEL_BRANCH }} ${{ env.KERNEL_SOURCE }} sources/linux-${{ env.KERNEL_VERSION }}
-          cd sources/linux-${{ env.KERNEL_VERSION }}
-          
-          # 验证提交是否存在
-          echo "===== 验证提交 ${{ env.KERNEL_COMMIT }} 是否存在 ====="
-          if git cat-file -e ${{ env.KERNEL_COMMIT }} 2>/dev/null; then
-            echo "✅ 提交 ${{ env.KERNEL_COMMIT }} 存在，开始切换"
-            git checkout ${{ env.KERNEL_COMMIT }}
-            echo "✅ 已成功切换到提交：${{ env.KERNEL_COMMIT }}"
-          else
-            echo "❌ 提交 ${{ env.KERNEL_COMMIT }} 不存在于 ${{ env.KERNEL_BRANCH }} 分支！"
-            echo "===== 分支所有提交（前20条） ====="
-            git log --oneline -20
+          # 1. 检查分卷文件是否存在
+          if ! ls ${{ github.workspace }}/${{ env.SPLIT_TARBALL_PREFIX }}* 1> /dev/null 2>&1; then
+            echo "❌ 仓库根目录未找到分卷文件 ${{ env.SPLIT_TARBALL_PREFIX }}*！"
             exit 1
           fi
-          cd $ARMBIAN_DIR
+          
+          # 2. 合并所有分卷为完整压缩包
+          cat ${{ github.workspace }}/${{ env.SPLIT_TARBALL_PREFIX }}* > ${{ github.workspace }}/linux-kernel.tar.gz
+          echo "✅ 分卷文件合并完成，生成完整压缩包 linux-kernel.tar.gz"
+          
+          # 3. 创建Armbian内核源码目录
+          mkdir -p $ARMBIAN_DIR/sources/linux-${{ env.KERNEL_VERSION }}
+          
+          # 4. 解压压缩包到目标目录（--strip-components=1 去掉顶层目录）
+          tar -zxf ${{ github.workspace }}/linux-kernel.tar.gz -C $ARMBIAN_DIR/sources/linux-${{ env.KERNEL_VERSION }} --strip-components=1
+          echo "✅ 内核压缩包解压到 $ARMBIAN_DIR/sources/linux-${{ env.KERNEL_VERSION }}"
+          
+          # 5. 验证内核源码有效性（检查核心文件 Makefile）
+          if [ -f $ARMBIAN_DIR/sources/linux-${{ env.KERNEL_VERSION }}/Makefile ]; then
+            echo "✅ 内核源码有效，包含核心文件 Makefile"
+          else
+            echo "❌ 内核源码解压失败，未找到 Makefile"
+            exit 1
+          fi
 
       - name: "Step 1 - Generate Kernel Config (New CLI: kernel-config)"
         run: |
