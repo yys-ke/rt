@@ -1,4 +1,4 @@
-name: Build RT kernel deb (any branch)
+name: Build 6.12.43 RT kernel deb (any branch)
 
 on: push        # 任何分支都触发
 
@@ -20,7 +20,7 @@ jobs:
       - name: 拉取 Armbian 源码
         run: git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git armbian
 
-      - name: 恢复 ccache
+      - name: 恢复 ccache（本地编译缓存）
         uses: actions/cache@v4
         with:
           path: ccache
@@ -42,22 +42,24 @@ jobs:
           mkdir -p armbian/userpatches/kernel/rockchip-rk3588-6.12
           xz -d < patch-6.12.43-rt12.patch.xz > armbian/userpatches/kernel/rockchip-rk3588-6.12/rt12.patch
 
-      - name: 编译内核（新 CLI）
+      - name: 编译 6.12.43 RT 内核（关闭远程缓存）
         run: |
           cd armbian
           ./compile.sh kernel \
             BOARD=orangepi5-plus \
             BRANCH=current \
             RELEASE=bookworm \
+            KERNEL_GIT=6.12.43 \
             KERNEL_CONFIGURE=prebuilt \
             USERPATCHES_ID=rt \
+            ARMBIAN_CACHE_MODE=none \
             USE_CCACHE=yes \
             CCACHE_DIR=$GITHUB_WORKSPACE/ccache
 
       - name: 上传内核 deb 包
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-rt-debs-${{ github.ref_name }}-${{ github.run_number }}
+          name: kernel-6.12.43-rt-debs-${{ github.ref_name }}-${{ github.run_number }}
           path: armbian/output/debs/*.deb
           retention-days: 90
 
