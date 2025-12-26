@@ -1,4 +1,4 @@
-name: Build RT Kernel (OrangePi 5 Plus) - 100% Force Rebuild
+name: Build RT Kernel (OrangePi 5 Plus) - Fix Git Clone & Checkout
 
 on:
   push:
@@ -20,8 +20,10 @@ jobs:
       BOARD: orangepi5-plus
       BRANCH: current
       RELEASE: bookworm
+      # 核心修正：指定分支+提交+仓库地址
+      KERNEL_BRANCH: linux-6.12.y
       KERNEL_COMMIT: 9becd7c25c61ae7e5b6fbfc3c226b1f23af7638c
-      KERNEL_SOURCE: https://github.com/armbian/linux.git
+      KERNEL_SOURCE: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
       USERPATCHES_ID: rt
       RT_PATCH_VERSION: rt12
       KERNEL_VERSION: 6.12.43
@@ -60,8 +62,7 @@ jobs:
           cd $ARMBIAN_DIR
           git submodule update --init --recursive
 
-          # ========== 核心修改1：破坏Armbian缓存检测逻辑 ==========
-          # 修改缓存检测脚本，强制返回"未找到缓存"
+          # 修改Armbian核心脚本，禁用缓存检测
           sudo sed -i 's/artifact_is_available_in_remote_cache() {/artifact_is_available_in_remote_cache() { return 1;/g' $ARMBIAN_DIR/lib/functions/artifacts/artifacts-obtain.sh
           sudo sed -i 's/artifact_is_available_in_local_cache() {/artifact_is_available_in_local_cache() { return 1;/g' $ARMBIAN_DIR/lib/functions/artifacts/artifacts-obtain.sh
           echo "✅ 已修改Armbian核心脚本，禁用缓存检测"
@@ -69,18 +70,17 @@ jobs:
       - name: Prepare User Patches & Configs (Fix Path/Name)
         run: |
           set -e
-          # ========== 核心修改2：修复RT补丁路径（符合Armbian规范） ==========
-          # Armbian对rockchip64的补丁路径是：rockchip64-6.12（而非rockchip-rk3588-6.12）
+          # 修复RT补丁路径（符合Armbian规范）
           PATCH_DIR=$ARMBIAN_DIR/userpatches/kernel/rockchip64-${{ env.KERNEL_VERSION }}
           mkdir -p $PATCH_DIR
           
-          # 1. 核心RT配置（强制注入到内核.config）
+          # 核心RT配置
           echo 'CONFIG_MODVERSIONS=n' > $ARMBIAN_DIR/userpatches/config-custom.conf
           echo 'CONFIG_PREEMPT_RT=y' >> $ARMBIAN_DIR/userpatches/config-custom.conf
           echo 'CONFIG_PREEMPT=y' >> $ARMBIAN_DIR/userpatches/config-custom.conf
           echo 'CONFIG_HZ_1000=y' >> $ARMBIAN_DIR/userpatches/config-custom.conf
           
-          # 2. 解压RT补丁（命名为0001-rt.patch，确保优先应用）
+          # 解压RT补丁
           PATCH_FILE="patch-${{ env.KERNEL_VERSION }}-${{ env.RT_PATCH_VERSION }}.patch.xz"
           if [ ! -f $PATCH_FILE ]; then
             echo "❌ 补丁文件 $PATCH_FILE 不存在！"
@@ -100,14 +100,13 @@ jobs:
       - name: Clean All Caches (Ultra Deep)
         run: |
           set -e
-          # 深度清理：删除所有可能的缓存
+          # 深度清理所有缓存
           rm -rf $ARMBIAN_DIR/cache/* || true
           rm -rf $ARMBIAN_DIR/output/* || true
           rm -rf $ARMBIAN_DIR/sources/* || true
           rm -rf $ARMBIAN_DIR/tmp/* || true
           sudo rm -rf /armbian/* || true
           docker system prune -af || true
-          # 删除Armbian的版本缓存
           rm -rf $ARMBIAN_DIR/.cache/* || true
           echo "✅ 深度清理所有缓存完成"
 
@@ -121,6 +120,7 @@ jobs:
           RELEASE="${{ env.RELEASE }}"
           KERNEL_GIT="${{ env.KERNEL_COMMIT }}"
           KERNEL_SOURCE="${{ env.KERNEL_SOURCE }}"
+          KERNEL_BRANCH="${{ env.KERNEL_BRANCH }}"
           KERNEL_CACHE="no"
           USERPATCHES_ID="${{ env.USERPATCHES_ID }}"
           # 彻底禁用缓存
@@ -131,32 +131,45 @@ jobs:
           USE_CCACHE="no"
           # 强制应用自定义配置
           CONFIG_CUSTOM="$ARMBIAN_DIR/userpatches/config-custom.conf"
-          # 破坏缓存哈希（关键！）
+          # 破坏缓存哈希
           CUSTOM_HASH="rt-kernel-$(date +%s)"
           NONINTERACTIVE="yes"
           VERBOSE="yes"
           EOF
 
-      - name: Compile RT Kernel (Ultimate Force)
+      - name: Compile RT Kernel (Fix Git Clone & Checkout)
         run: |
           set -e
           cd $ARMBIAN_DIR
-          # ========== 核心修改3：先手动拉取并切换到指定内核提交 ==========
-          # 手动克隆内核源码，避免框架缓存
+
+          # ========== 核心修复：指定分支+深度克隆+验证提交 ==========
           mkdir -p sources/linux-${{ env.KERNEL_VERSION }}
-          git clone ${{ env.KERNEL_SOURCE }} sources/linux-${{ env.KERNEL_VERSION }}
+          # 1. 克隆指定分支，深度100（确保包含目标提交）
+          git clone --branch ${{ env.KERNEL_BRANCH }} --depth=100 ${{ env.KERNEL_SOURCE }} sources/linux-${{ env.KERNEL_VERSION }}
           cd sources/linux-${{ env.KERNEL_VERSION }}
-          git checkout ${{ env.KERNEL_COMMIT }}
-          echo "✅ 已手动拉取并切换到内核提交：${{ env.KERNEL_COMMIT }}"
+          
+          # 2. 验证提交是否存在
+          echo "===== 验证提交 ${{ env.KERNEL_COMMIT }} 是否存在 ====="
+          if git cat-file -e ${{ env.KERNEL_COMMIT }} 2>/dev/null; then
+            echo "✅ 提交 ${{ env.KERNEL_COMMIT }} 存在，开始切换"
+            git checkout ${{ env.KERNEL_COMMIT }}
+            echo "✅ 已成功切换到提交：${{ env.KERNEL_COMMIT }}"
+          else
+            echo "❌ 提交 ${{ env.KERNEL_COMMIT }} 不存在于 ${{ env.KERNEL_BRANCH }} 分支！"
+            echo "===== 分支最近5个提交 ====="
+            git log --oneline -5
+            exit 1
+          fi
           cd $ARMBIAN_DIR
 
-          # 执行编译（强制参数+破坏缓存哈希）
+          # 执行编译
           ./compile.sh kernel \
             "BOARD=${{ env.BOARD }}" \
             "BRANCH=${{ env.BRANCH }}" \
             "RELEASE=${{ env.RELEASE }}" \
             "KERNEL_GIT=${{ env.KERNEL_COMMIT }}" \
             "KERNEL_SOURCE=${{ env.KERNEL_SOURCE }}" \
+            "KERNEL_BRANCH=${{ env.KERNEL_BRANCH }}" \
             "KERNEL_CACHE=no" \
             "KERNEL_CONFIGURE=yes" \
             "USERPATCHES_ID=${{ env.USERPATCHES_ID }}" \
