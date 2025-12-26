@@ -32,10 +32,13 @@ jobs:
             armbian-ccache-${{ runner.os }}-${{ github.ref }}-
             armbian-ccache-${{ runner.os }}-
 
-      - name: 放入用户补丁（跳过缺失包）
+      - name: 放入用户补丁（缺包 + 内核配置）
         run: |
           mkdir -p armbian/userpatches
+          # 1. 跳过 software-properties-common
           cp lib.config armbian/userpatches/lib.config
+          # 2. 关闭 MODVERSIONS，规避 RT 模块链接失败
+          echo 'CONFIG_MODVERSIONS=n' >> armbian/userpatches/config-kernel.conf
 
       - name: 打入 RT 补丁
         run: |
