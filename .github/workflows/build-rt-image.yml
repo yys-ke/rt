@@ -12,6 +12,11 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: 最大化可用空间
+        run: |
+          # 官方脚本：删 runner 预装软件，可空出 ~20 GB
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
       - name: 安装依赖
         run: |
           sudo apt-get update -qq
@@ -23,7 +28,7 @@ jobs:
       - name: 拉取 Armbian 源码
         run: git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git armbian
 
-      - name: 恢复 ccache
+      - name: 恢复 ccache（限 1 GB）
         uses: actions/cache@v4
         with:
           path: ccache
@@ -32,12 +37,10 @@ jobs:
             armbian-ccache-${{ runner.os }}-${{ github.ref }}-
             armbian-ccache-${{ runner.os }}-
 
-      - name: 放入用户补丁（缺包 + 内核配置）
+      - name: 放入用户补丁
         run: |
           mkdir -p armbian/userpatches
-          # 1. 跳过 software-properties-common
           cp lib.config armbian/userpatches/lib.config
-          # 2. 关闭 MODVERSIONS，规避 RT 模块链接失败
           echo 'CONFIG_MODVERSIONS=n' >> armbian/userpatches/config-kernel.conf
 
       - name: 打入 RT 补丁
@@ -48,6 +51,9 @@ jobs:
       - name: 编译镜像
         run: |
           cd armbian
+          # 限制 ccache 大小 & 立即回收
+          export CCACHE_MAXSIZE=1G
+          ccache -M 1G && ccache -c
           ./compile.sh \
             BOARD=orangepi5-plus \
             BRANCH=current \
