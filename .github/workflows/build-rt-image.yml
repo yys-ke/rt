@@ -22,7 +22,7 @@ jobs:
       RELEASE: bookworm
       KERNEL_BRANCH: linux-6.12.y
       KERNEL_COMMIT: 9becd7c25c61ae7e5b6fbfc3c226b1f23af7638c
-      # 内核快照包下载链接
+      # 修复：环境变量用${{ env.xxx }}包裹
       KERNEL_SNAPSHOT_URL: "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/snapshot/linux-${{ env.KERNEL_COMMIT }}.tar.gz"
       USERPATCHES_ID: rt
       RT_PATCH_VERSION: rt12
@@ -58,27 +58,27 @@ jobs:
       - name: Pull Armbian Build Framework
         run: |
           set -e
-          git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git $ARMBIAN_DIR
-          cd $ARMBIAN_DIR
+          git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git ${{ env.ARMBIAN_DIR }}
+          cd ${{ env.ARMBIAN_DIR }}
           git submodule update --init --recursive
 
           # 禁用Armbian缓存检测
-          sudo sed -i 's/artifact_is_available_in_remote_cache() {/artifact_is_available_in_remote_cache() { return 1;/g' $ARMBIAN_DIR/lib/functions/artifacts/artifacts-obtain.sh
-          sudo sed -i 's/artifact_is_available_in_local_cache() {/artifact_is_available_in_local_cache() { return 1;/g' $ARMBIAN_DIR/lib/functions/artifacts/artifacts-obtain.sh
+          sudo sed -i 's/artifact_is_available_in_remote_cache() {/artifact_is_available_in_remote_cache() { return 1;/g' ${{ env.ARMBIAN_DIR }}/lib/functions/artifacts/artifacts-obtain.sh
+          sudo sed -i 's/artifact_is_available_in_local_cache() {/artifact_is_available_in_local_cache() { return 1;/g' ${{ env.ARMBIAN_DIR }}/lib/functions/artifacts/artifacts-obtain.sh
           echo "✅ 已修改Armbian核心脚本，禁用缓存检测"
 
       - name: Prepare User Patches & Configs (Fix Path/Name)
         run: |
           set -e
-          # 修复RT补丁路径（rockchip64架构）
-          PATCH_DIR=$ARMBIAN_DIR/userpatches/kernel/rockchip64-${{ env.KERNEL_VERSION }}
+          # 修复：环境变量用${{ env.xxx }}包裹
+          PATCH_DIR=${{ env.ARMBIAN_DIR }}/userpatches/kernel/rockchip64-${{ env.KERNEL_VERSION }}
           mkdir -p $PATCH_DIR
           
           # 写入RT内核强制配置
-          echo 'CONFIG_MODVERSIONS=n' > $ARMBIAN_DIR/userpatches/config-custom.conf
-          echo 'CONFIG_PREEMPT_RT=y' >> $ARMBIAN_DIR/userpatches/config-custom.conf
-          echo 'CONFIG_PREEMPT=y' >> $ARMBIAN_DIR/userpatches/config-custom.conf
-          echo 'CONFIG_HZ_1000=y' >> $ARMBIAN_DIR/userpatches/config-custom.conf
+          echo 'CONFIG_MODVERSIONS=n' > ${{ env.ARMBIAN_DIR }}/userpatches/config-custom.conf
+          echo 'CONFIG_PREEMPT_RT=y' >> ${{ env.ARMBIAN_DIR }}/userpatches/config-custom.conf
+          echo 'CONFIG_PREEMPT=y' >> ${{ env.ARMBIAN_DIR }}/userpatches/config-custom.conf
+          echo 'CONFIG_HZ_1000=y' >> ${{ env.ARMBIAN_DIR }}/userpatches/config-custom.conf
           
           # 解压RT补丁（确保根目录有patch-6.12.43-rt12.patch.xz）
           PATCH_FILE="patch-${{ env.KERNEL_VERSION }}-${{ env.RT_PATCH_VERSION }}.patch.xz"
@@ -95,24 +95,24 @@ jobs:
             echo "❌ RT补丁解压失败！"
             exit 1
           fi
-          chmod -R 755 $ARMBIAN_DIR/userpatches
+          chmod -R 755 ${{ env.ARMBIAN_DIR }}/userpatches
 
       - name: Clean All Caches (Ultra Deep)
         run: |
           set -e
-          rm -rf $ARMBIAN_DIR/cache/* || true
-          rm -rf $ARMBIAN_DIR/output/* || true
-          rm -rf $ARMBIAN_DIR/sources/* || true
-          rm -rf $ARMBIAN_DIR/tmp/* || true
+          rm -rf ${{ env.ARMBIAN_DIR }}/cache/* || true
+          rm -rf ${{ env.ARMBIAN_DIR }}/output/* || true
+          rm -rf ${{ env.ARMBIAN_DIR }}/sources/* || true
+          rm -rf ${{ env.ARMBIAN_DIR }}/tmp/* || true
           sudo rm -rf /armbian/* || true
           docker system prune -af || true
-          rm -rf $ARMBIAN_DIR/.cache/* || true
+          rm -rf ${{ env.ARMBIAN_DIR }}/.cache/* || true
           echo "✅ 深度清理所有缓存完成"
 
       - name: Write Core Config (Skip Remote Git Check)
         run: |
           set -e
-          cat > $ARMBIAN_DIR/userpatches/config.conf << EOF
+          cat > ${{ env.ARMBIAN_DIR }}/userpatches/config.conf << EOF
           # 强制核心参数
           BOARD="${{ env.BOARD }}"
           BRANCH="${{ env.BRANCH }}"
@@ -129,7 +129,7 @@ jobs:
           FORCE_REBUILD="yes"
           USE_CCACHE="no"
           # 强制应用自定义配置
-          CONFIG_CUSTOM="$ARMBIAN_DIR/userpatches/config-custom.conf"
+          CONFIG_CUSTOM="${{ env.ARMBIAN_DIR }}/userpatches/config-custom.conf"
           # 破坏缓存哈希
           CUSTOM_HASH="rt-kernel-$(date +%s)"
           NONINTERACTIVE="yes"
@@ -152,14 +152,14 @@ jobs:
           echo "✅ 内核快照包下载完成"
           
           # 2. 创建Armbian内核源码目录
-          mkdir -p $ARMBIAN_DIR/sources/linux-${{ env.KERNEL_VERSION }}
+          mkdir -p ${{ env.ARMBIAN_DIR }}/sources/linux-${{ env.KERNEL_VERSION }}
           
           # 3. 解压压缩包到目标目录（--strip-components=1 去掉顶层目录）
-          tar -zxf ${{ github.workspace }}/linux-kernel.tar.gz -C $ARMBIAN_DIR/sources/linux-${{ env.KERNEL_VERSION }} --strip-components=1
-          echo "✅ 内核压缩包解压到 $ARMBIAN_DIR/sources/linux-${{ env.KERNEL_VERSION }}"
+          tar -zxf ${{ github.workspace }}/linux-kernel.tar.gz -C ${{ env.ARMBIAN_DIR }}/sources/linux-${{ env.KERNEL_VERSION }} --strip-components=1
+          echo "✅ 内核压缩包解压到 ${{ env.ARMBIAN_DIR }}/sources/linux-${{ env.KERNEL_VERSION }}"
           
           # 4. 验证内核源码有效性（检查核心文件 Makefile）
-          if [ -f $ARMBIAN_DIR/sources/linux-${{ env.KERNEL_VERSION }}/Makefile ]; then
+          if [ -f ${{ env.ARMBIAN_DIR }}/sources/linux-${{ env.KERNEL_VERSION }}/Makefile ]; then
             echo "✅ 内核源码有效，包含核心文件 Makefile"
           else
             echo "❌ 内核源码解压失败，未找到 Makefile"
@@ -169,14 +169,14 @@ jobs:
       - name: "Step 1 - Generate Kernel Config (New CLI: kernel-config)"
         run: |
           set -e
-          cd $ARMBIAN_DIR
+          cd ${{ env.ARMBIAN_DIR }}
           # 新语法：先执行 kernel-config 生成配置，替代废弃的 KERNEL_CONFIGURE=yes
           ./compile.sh kernel-config \
             "BOARD=${{ env.BOARD }}" \
             "BRANCH=${{ env.BRANCH }}" \
             "RELEASE=${{ env.RELEASE }}" \
             "KERNEL_GIT=${{ env.KERNEL_COMMIT }}" \
-            "CONFIG_CUSTOM=$ARMBIAN_DIR/userpatches/config-custom.conf" \
+            "CONFIG_CUSTOM=${{ env.ARMBIAN_DIR }}/userpatches/config-custom.conf" \
             "NONINTERACTIVE=yes" \
             "VERBOSE=yes"
           echo "✅ 内核配置生成完成（新CLI语法）"
@@ -184,7 +184,7 @@ jobs:
       - name: "Step 2 - Compile RT Kernel (New CLI: kernel)"
         run: |
           set -e
-          cd $ARMBIAN_DIR
+          cd ${{ env.ARMBIAN_DIR }}
           # 新语法：再执行 kernel 命令编译内核，添加单线程参数降低资源占用
           ./compile.sh kernel \
             "BOARD=${{ env.BOARD }}" \
@@ -200,7 +200,7 @@ jobs:
             "SKIP_LOCAL_CACHE=yes" \
             "FORCE_REBUILD=yes" \
             "USE_CCACHE=no" \
-            "CONFIG_CUSTOM=$ARMBIAN_DIR/userpatches/config-custom.conf" \
+            "CONFIG_CUSTOM=${{ env.ARMBIAN_DIR }}/userpatches/config-custom.conf" \
             "CUSTOM_HASH=rt-kernel-$(date +%s)" \
             "NONINTERACTIVE=yes" \
             "VERBOSE=yes" \
@@ -210,10 +210,10 @@ jobs:
       - name: Verify Compiled Artifacts
         run: |
           set -e
-          DEB_FILES=$ARMBIAN_DIR/output/debs/*.deb
+          DEB_FILES=${{ env.ARMBIAN_DIR }}/output/debs/*.deb
           if [ -z "$(ls $DEB_FILES 2>/dev/null)" ]; then
             echo "❌ 未生成deb包！"
-            cat $ARMBIAN_DIR/output/logs/*.log || true
+            cat ${{ env.ARMBIAN_DIR }}/output/logs/*.log || true
             exit 1
           fi
           echo "===== 生成的deb包 ====="
