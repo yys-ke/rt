@@ -1,4 +1,4 @@
-name: Build RT Kernel (OrangePi 5 Plus) - Custom Armbian Docker
+name: Build RT Kernel (OrangePi 5 Plus) - No Cache Armbian
 
 on:
   push:
@@ -10,18 +10,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-custom-docker-and-kernel:
+  build-rt-kernel:
     runs-on: ubuntu-22.04
     permissions:
       contents: read
       actions: read
     env:
       ARMBIAN_DIR: ${{ github.workspace }}/armbian
-      DOCKER_IMAGE_NAME: armbian-custom:rt-kernel
-      DOCKERFILE_PATH: ${{ github.workspace }}/Dockerfile.armbian-custom
       KERNEL_VERSION: 6.12.43
       CUSTOM_CONFIG_FILE: config-6.12.43-current-rockchip64
       RT_PATCH_FILE: patch-6.12.43-rt12.patch.xz
+      # 生成唯一哈希值（确保和缓存不匹配）
+      UNIQUE_HASH: ${{ github.run_id }}-${{ github.run_attempt }}-$(date +%s)
 
     steps:
       - name: Checkout Local Repository
@@ -29,155 +29,120 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Install System Dependencies
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            git curl wget xz-utils build-essential libncurses5-dev \
+            flex bison libssl-dev bc dwarves cpio rsync kmod docker.io
+          # 启动 Docker 服务
+          sudo systemctl start docker
+          sudo systemctl enable docker
+          # 给当前用户 Docker 权限
+          sudo usermod -aG docker $USER
+          newgrp docker
+          echo "✅ 系统依赖安装完成，Docker 已启动"
+
       - name: Clone Armbian Source
         run: |
           set -e
-          # 克隆 Armbian 25.08 源码
+          # 克隆 Armbian 源码（深度1，加快速度）
           git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git $ARMBIAN_DIR
-          
-          # ========== 关键修复：适配 Dockerfile 路径 ==========
-          # 先检查新版本路径（docker/Dockerfile）
-          if [ -f "$ARMBIAN_DIR/docker/Dockerfile" ]; then
-            cp $ARMBIAN_DIR/docker/Dockerfile $DOCKERFILE_PATH
-            echo "✅ 提取 Armbian 新版本 Dockerfile（docker/Dockerfile）完成"
-          # 兼容旧版本路径（根目录/Dockerfile）
-          elif [ -f "$ARMBIAN_DIR/Dockerfile" ]; then
-            cp $ARMBIAN_DIR/Dockerfile $DOCKERFILE_PATH
-            echo "✅ 提取 Armbian 旧版本 Dockerfile（根目录）完成"
-          else
-            echo "❌ 未找到 Armbian Dockerfile，退出"
-            exit 1
-          fi
+          # 进入 Armbian 目录
+          cd $ARMBIAN_DIR
+          # 初始化 Armbian 环境（下载必要脚本）
+          ./scripts/initialize.sh
+          echo "✅ Armbian 源码克隆并初始化完成"
 
-      - name: Modify Dockerfile (Disable Cache + Add Dependencies)
+      - name: Prepare Userpatches (RT Patch + Custom Config)
         run: |
           set -e
-          # 向 Dockerfile 末尾添加自定义修改（核心逻辑不变）
-          cat >> $DOCKERFILE_PATH << EOF
+          cd $ARMBIAN_DIR
+          # 1. 创建 userpatches 目录（Armbian 优先读取该目录的自定义内容）
+          mkdir -p userpatches/kernel/rockchip64-current
+          mkdir -p userpatches/config
 
-          # ========== 自定义修改：禁用 Armbian 缓存 ==========
-          # 1. 修改缓存检测脚本，强制返回未找到缓存
-          RUN if [ -f "/armbian/lib/functions/artifacts/artifacts-obtain.sh" ]; then \
-                sed -i 's/artifact_is_available_in_remote_cache() {/artifact_is_available_in_remote_cache() { return 0;/g' /armbian/lib/functions/artifacts/artifacts-obtain.sh; \
-                sed -i 's/artifact_is_available_in_local_cache() {/artifact_is_available_in_local_cache() { return 0;/g' /armbian/lib/functions/artifacts/artifacts-obtain.sh; \
-              fi
-
-          # 2. 预装 RT 补丁依赖
-          RUN apt-get update && apt-get install -y --no-install-recommends \
-              xz-utils patch bc dwarves git curl && \
-              rm -rf /var/lib/apt/lists/*
-
-          # 3. 设置全局环境变量，强制禁用缓存
-          ENV ARMBIAN_CACHE_MODE=none \
-              SKIP_REMOTE_CACHE=yes \
-              SKIP_LOCAL_CACHE=yes \
-              FORCE_REBUILD=yes \
-              BUILD_ALL=yes \
-              NO_CACHE=yes \
-              VERBOSE=yes
-
-          # ========== 自定义修改结束 ==========
-          EOF
-          echo "✅ Dockerfile 修改完成，新增禁用缓存逻辑"
-
-      - name: Build Custom Armbian Docker Image
-        run: |
-          set -e
-          # 构建自定义 Docker 镜像（指定上下文为 Armbian 根目录，关键！）
-          docker build -t $DOCKER_IMAGE_NAME -f $DOCKERFILE_PATH $ARMBIAN_DIR
-          
-          # 验证镜像构建成功
-          if docker images | grep -q $DOCKER_IMAGE_NAME; then
-            echo "✅ 自定义 Armbian Docker 镜像构建完成：$DOCKER_IMAGE_NAME"
-          else
-            echo "❌ 自定义 Docker 镜像构建失败"
-            exit 1
-          fi
-
-      - name: Prepare Armbian Userpatches
-        run: |
-          set -e
-          # 创建 userpatches 目录（确保存在）
-          mkdir -p $ARMBIAN_DIR/userpatches/kernel/rockchip64-$KERNEL_VERSION
-          
-          # 复制 RT 补丁到 userpatches（Armbian 会自动应用该目录下的补丁）
+          # 2. 复制并解压 RT 补丁（Armbian 会自动应用该目录下的补丁）
           if [ -f "${{ github.workspace }}/$RT_PATCH_FILE" ]; then
-            cp ${{ github.workspace }}/$RT_PATCH_FILE $ARMBIAN_DIR/userpatches/kernel/rockchip64-$KERNEL_VERSION/
-            echo "✅ RT 补丁复制到 userpatches 完成"
+            # 解压 RT 补丁到 userpatches
+            xz -d -c ${{ github.workspace }}/$RT_PATCH_FILE > userpatches/kernel/rockchip64-current/9999-rt-patch.patch
+            echo "✅ RT 补丁解压到 userpatches 完成"
           else
             echo "❌ 未找到 RT 补丁文件：${{ github.workspace }}/$RT_PATCH_FILE"
             exit 1
           fi
-          
-          # 创建自定义配置文件（合并 RT 内核参数）
-          cat > $ARMBIAN_DIR/userpatches/config-custom.conf << EOF
-          CONFIG_PREEMPT_RT=y
-          CONFIG_PREEMPT=y
-          CONFIG_HZ_1000=y
-          CONFIG_MODVERSIONS=n
-          EOF
-          
-          # 复制根目录的内核配置到 userpatches（作为基础配置）
+
+          # 3. 复制自定义内核配置（覆盖 Armbian 默认配置）
           if [ -f "${{ github.workspace }}/$CUSTOM_CONFIG_FILE" ]; then
-            cp ${{ github.workspace }}/$CUSTOM_CONFIG_FILE $ARMBIAN_DIR/userpatches/config-distro.config
-            echo "✅ 自定义内核配置复制完成"
+            cp ${{ github.workspace }}/$CUSTOM_CONFIG_FILE userpatches/config/config-distro.config
+            # 添加 RT 内核必要配置（强制覆盖）
+            echo -e "\n# RT Kernel Config (Added by Custom Build)" >> userpatches/config/config-distro.config
+            echo "CONFIG_PREEMPT_RT=y" >> userpatches/config/config-distro.config
+            echo "CONFIG_PREEMPT=y" >> userpatches/config/config-distro.config
+            echo "CONFIG_HZ_1000=y" >> userpatches/config/config-distro.config
+            echo "CONFIG_MODVERSIONS=n" >> userpatches/config/config-distro.config
+            echo "✅ 自定义内核配置复制并追加 RT 参数完成"
           else
             echo "❌ 未找到自定义配置文件：${{ github.workspace }}/$CUSTOM_CONFIG_FILE"
             exit 1
           fi
 
-      - name: Compile Kernel with Custom Docker Image
+          # 4. 创建自定义哈希文件（破坏 Armbian 缓存哈希）
+          echo $UNIQUE_HASH > userpatches/custom-hash.txt
+          echo "✅ 生成唯一哈希值：$UNIQUE_HASH"
+
+      - name: Compile Kernel (Force No Cache)
         run: |
           set -e
           cd $ARMBIAN_DIR
-          # 强制 Armbian 使用我们的自定义 Docker 镜像（核心环境变量）
-          export DOCKER_IMAGE=$DOCKER_IMAGE_NAME
+          # 核心：设置 Armbian 环境变量，强制禁用所有缓存
+          export ARMBIAN_CACHE_MODE=none
+          export SKIP_REMOTE_CACHE=yes
+          export SKIP_LOCAL_CACHE=yes
+          export FORCE_REBUILD=yes
+          export BUILD_ALL=yes
+          export NO_CACHE=yes
+          export CUSTOM_HASH=$UNIQUE_HASH
           export PREFER_DOCKER=yes
-          export DOCKER_BUILD=yes
-          
-          # 执行 Armbian 编译脚本（禁用所有缓存参数）
+          export VERBOSE=yes
+          export NONINTERACTIVE=yes
+
+          # 执行 Armbian 编译脚本（关键：添加 UNIQUE 参数破坏缓存）
           ./compile.sh kernel \
             BOARD=orangepi5-plus \
             BRANCH=current \
             RELEASE=bookworm \
             KERNEL_VERSION=$KERNEL_VERSION \
             KERNEL_BRANCH=linux-6.12.y \
-            CONFIG_CUSTOM=userpatches/config-custom.conf \
-            USERPATCHES_ID=rt \
-            VERBOSE=yes \
-            NONINTERACTIVE=yes \
-            ARMBIAN_CACHE_MODE=none \
-            SKIP_REMOTE_CACHE=yes \
-            SKIP_LOCAL_CACHE=yes \
-            FORCE_REBUILD=yes \
-            BUILD_ALL=yes
-          echo "✅ 内核编译完成（使用自定义 Docker 镜像）"
+            USERPATCHES_ID=rt-$UNIQUE_HASH \
+            CONFIG_DEFCONFIG=userpatches/config/config-distro.config \
+            EXTRA_CONFIG=userpatches/config/config-distro.config
 
-      - name: Upload Compiled Kernel Package
+          echo "✅ 内核编译完成（无缓存拦截）"
+
+      - name: Collect Compiled Package
         run: |
           set -e
-          # 查找编译后的 deb 包（兼容不同命名格式）
-          DEB_DIR="$ARMBIAN_DIR/output/debs"
-          mkdir -p ${{ github.workspace }}/kernel-deb
-          
-          # 查找所有相关内核包
-          find $DEB_DIR -name "kernel-rockchip64-current*$KERNEL_VERSION*.deb" -o \
-               -name "linux-image-*$KERNEL_VERSION*.deb" | while read deb_file; do
+          # 创建输出目录
+          mkdir -p ${{ github.workspace }}/kernel-output
+          # 查找所有相关内核包（兼容 Armbian 命名规则）
+          find $ARMBIAN_DIR/output/debs -name "*.deb" -type f | grep -E "kernel-rockchip64|linux-image|linux-headers" | while read deb_file; do
             if [ -f "$deb_file" ]; then
-              cp "$deb_file" ${{ github.workspace }}/kernel-deb/
-              echo "✅ 复制内核包：$(basename $deb_file)"
+              cp "$deb_file" ${{ github.workspace }}/kernel-output/
+              echo "✅ 收集到内核包：$(basename $deb_file)"
             fi
           done
-          
           # 验证是否找到包
-          if [ $(ls -1 ${{ github.workspace }}/kernel-deb/*.deb 2>/dev/null | wc -l) -eq 0 ]; then
-            echo "❌ 未找到编译后的内核 deb 包"
+          if [ $(ls -1 ${{ github.workspace }}/kernel-output/*.deb 2>/dev/null | wc -l) -eq 0 ]; then
+            echo "❌ 未找到编译后的内核包，打印输出目录内容："
+            ls -la $ARMBIAN_DIR/output/debs/
             exit 1
           fi
 
-      - name: Upload Artifact
+      - name: Upload Kernel Package
         uses: actions/upload-artifact@v4
         with:
-          name: rt-kernel-armbian-custom-docker-$KERNEL_VERSION
-          path: ${{ github.workspace }}/kernel-deb/*
+          name: rt-kernel-orangepi5-plus-${{ env.KERNEL_VERSION }}-${{ env.UNIQUE_HASH }}
+          path: ${{ github.workspace }}/kernel-output/*
           retention-days: 90
