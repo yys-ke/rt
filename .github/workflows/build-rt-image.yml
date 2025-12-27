@@ -1,12 +1,12 @@
-name: Build RT Kernel (OrangePi 5 Plus) - No Cache Armbian
+name: Build RT Kernel (Deb Package + Modules) for Orange Pi 5 Plus
 
 on:
   push:
-    branches: ['*']
-  workflow_dispatch:
+    branches: [ kernel ]  # 触发分支，按需修改
+  workflow_dispatch:    # 手动触发
 
 concurrency:
-  group: ${{ github.workspace }}-${{ github.ref }}
+  group: rt-kernel-deb-build
   cancel-in-progress: true
 
 jobs:
@@ -14,135 +14,163 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: read
-      actions: read
+      actions: write
     env:
-      ARMBIAN_DIR: ${{ github.workspace }}/armbian
-      KERNEL_VERSION: 6.12.43
+      # ========== 你的自定义配置 ==========
       CUSTOM_CONFIG_FILE: config-6.12.43-current-rockchip64
       RT_PATCH_FILE: patch-6.12.43-rt12.patch.xz
-      # 生成唯一哈希值（确保和缓存不匹配）
-      UNIQUE_HASH: ${{ github.run_id }}-${{ github.run_attempt }}-$(date +%s)
+      KERNEL_SRC_URL: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/snapshot/linux-9becd7c25c61ae7e5b6fbfc3c226b1f23af7638c.tar.gz
+      KERNEL_VERSION: 6.12.43
+      KERNEL_LOCALVERSION: -rt12-opi5plus  # 自定义内核版本后缀
+      # ========== 编译配置 ==========
+      ARCH: arm64
+      CROSS_COMPILE: aarch64-linux-gnu-
+      # ========== 工作目录 ==========
+      WORK_DIR: ${{ github.workspace }}/work
+      KERNEL_SRC: ${{ github.workspace }}/kernel-src
+      DEB_OUTPUT: ${{ github.workspace }}/kernel-deb-output
 
     steps:
-      - name: Checkout Local Repository
+      - name: Checkout Code
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Install System Dependencies
+      - name: Validate Local Files
         run: |
           set -e
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            git curl wget xz-utils build-essential libncurses5-dev \
-            flex bison libssl-dev bc dwarves cpio rsync kmod docker.io
-          # 启动 Docker 服务
-          sudo systemctl start docker
-          sudo systemctl enable docker
-          # 给当前用户 Docker 权限
-          sudo usermod -aG docker $USER
-          newgrp docker
-          echo "✅ 系统依赖安装完成，Docker 已启动"
+          # 检查关键文件是否存在
+          if [ ! -f "$CUSTOM_CONFIG_FILE" ]; then
+            echo "❌ 未找到自定义配置文件：$CUSTOM_CONFIG_FILE"
+            ls -la ${{ github.workspace }}
+            exit 1
+          fi
+          if [ ! -f "$RT_PATCH_FILE" ]; then
+            echo "❌ 未找到 RT 补丁文件：$RT_PATCH_FILE"
+            exit 1
+          fi
+          echo "✅ 本地文件验证通过"
 
-      - name: Clone Armbian Source
+      - name: Install Build Dependencies
         run: |
           set -e
-          # 克隆 Armbian 源码（深度1，加快速度）
-          git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git $ARMBIAN_DIR
-          # 进入 Armbian 目录
-          cd $ARMBIAN_DIR
-          # 初始化 Armbian 环境（下载必要脚本）
-          ./scripts/initialize.sh
-          echo "✅ Armbian 源码克隆并初始化完成"
+          sudo apt update -qq
+          sudo apt install -y --no-install-recommends \
+            xz-utils build-essential libncurses5-dev libncursesw5-dev \
+            flex bison libssl-dev bc dwarves crossbuild-essential-arm64 \
+            gcc-aarch64-linux-gnu kmod cpio rsync libelf-dev \
+            debhelper fakeroot linux-libc-dev:arm64 binutils-aarch64-linux-gnu
+          echo "✅ 编译依赖安装完成"
 
-      - name: Prepare Userpatches (RT Patch + Custom Config)
+      - name: Create Working Directories
         run: |
           set -e
-          cd $ARMBIAN_DIR
-          # 1. 创建 userpatches 目录（Armbian 优先读取该目录的自定义内容）
-          mkdir -p userpatches/kernel/rockchip64-current
-          mkdir -p userpatches/config
+          mkdir -p $WORK_DIR $KERNEL_SRC $DEB_OUTPUT
+          echo "✅ 工作目录创建完成"
 
-          # 2. 复制并解压 RT 补丁（Armbian 会自动应用该目录下的补丁）
-          if [ -f "${{ github.workspace }}/$RT_PATCH_FILE" ]; then
-            # 解压 RT 补丁到 userpatches
-            xz -d -c ${{ github.workspace }}/$RT_PATCH_FILE > userpatches/kernel/rockchip64-current/9999-rt-patch.patch
-            echo "✅ RT 补丁解压到 userpatches 完成"
+      - name: Download & Extract Kernel Source
+        run: |
+          set -e
+          cd $WORK_DIR
+          # 下载指定内核源码
+          wget -q $KERNEL_SRC_URL -O kernel-src.tar.gz
+          # 解压到内核源码目录（去除外层目录）
+          tar -xf kernel-src.tar.gz -C $KERNEL_SRC --strip-components=1
+          # 验证源码
+          if [ ! -f "$KERNEL_SRC/Makefile" ]; then
+            echo "❌ 内核源码解压失败"
+            exit 1
+          fi
+          echo "✅ 内核源码下载解压完成"
+
+      - name: Apply RT Patch & Load Custom Config
+        run: |
+          set -e
+          cd $KERNEL_SRC
+          # 1. 复制你的自定义配置文件
+          cp ${{ github.workspace }}/$CUSTOM_CONFIG_FILE ./.config
+          echo "✅ 已加载自定义配置：$CUSTOM_CONFIG_FILE"
+
+          # 2. 应用 RT 补丁（单线程，防卡住）
+          xz -d -c ${{ github.workspace }}/$RT_PATCH_FILE | patch -p1 -j1
+          if [ $? -eq 0 ]; then
+            echo "✅ RT 补丁应用成功"
           else
-            echo "❌ 未找到 RT 补丁文件：${{ github.workspace }}/$RT_PATCH_FILE"
-            exit 1
+            echo "⚠️ RT 补丁应用有警告，继续执行"
           fi
 
-          # 3. 复制自定义内核配置（覆盖 Armbian 默认配置）
-          if [ -f "${{ github.workspace }}/$CUSTOM_CONFIG_FILE" ]; then
-            cp ${{ github.workspace }}/$CUSTOM_CONFIG_FILE userpatches/config/config-distro.config
-            # 添加 RT 内核必要配置（强制覆盖）
-            echo -e "\n# RT Kernel Config (Added by Custom Build)" >> userpatches/config/config-distro.config
-            echo "CONFIG_PREEMPT_RT=y" >> userpatches/config/config-distro.config
-            echo "CONFIG_PREEMPT=y" >> userpatches/config/config-distro.config
-            echo "CONFIG_HZ_1000=y" >> userpatches/config/config-distro.config
-            echo "CONFIG_MODVERSIONS=n" >> userpatches/config/config-distro.config
-            echo "✅ 自定义内核配置复制并追加 RT 参数完成"
-          else
-            echo "❌ 未找到自定义配置文件：${{ github.workspace }}/$CUSTOM_CONFIG_FILE"
-            exit 1
-          fi
+          # 3. 配置内核（强制开启 RT 选项 + 设置版本后缀）
+          echo "CONFIG_LOCALVERSION=\"$KERNEL_LOCALVERSION\"" >> .config
+          sed -i 's/^# CONFIG_PREEMPT_RT is not set/CONFIG_PREEMPT_RT=y/' .config
+          sed -i 's/^CONFIG_PREEMPT=.*/CONFIG_PREEMPT=y/' .config
+          sed -i 's/^CONFIG_HZ=.*/CONFIG_HZ=1000/' .config
+          sed -i 's/^CONFIG_MODVERSIONS=.*/CONFIG_MODVERSIONS=n/' .config
+          # 开启 deb 包编译支持
+          sed -i 's/^# CONFIG_BUILD_DOCS is not set/CONFIG_BUILD_DOCS=n/' .config
+          sed -i 's/^# CONFIG_KERNEL_BUILD_USER is not set/CONFIG_KERNEL_BUILD_USER="github-actions"/' .config
+          sed -i 's/^# CONFIG_KERNEL_BUILD_DOMAIN is not set/CONFIG_KERNEL_BUILD_DOMAIN="github.com"/' .config
 
-          # 4. 创建自定义哈希文件（破坏 Armbian 缓存哈希）
-          echo $UNIQUE_HASH > userpatches/custom-hash.txt
-          echo "✅ 生成唯一哈希值：$UNIQUE_HASH"
+          # 4. 补全配置（单线程）
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j1 olddefconfig
+          echo "✅ 内核配置完成，版本后缀：$KERNEL_LOCALVERSION"
 
-      - name: Compile Kernel (Force No Cache)
+      - name: Compile RT Kernel (Image + Modules + DTBs)
         run: |
           set -e
-          cd $ARMBIAN_DIR
-          # 核心：设置 Armbian 环境变量，强制禁用所有缓存
-          export ARMBIAN_CACHE_MODE=none
-          export SKIP_REMOTE_CACHE=yes
-          export SKIP_LOCAL_CACHE=yes
-          export FORCE_REBUILD=yes
-          export BUILD_ALL=yes
-          export NO_CACHE=yes
-          export CUSTOM_HASH=$UNIQUE_HASH
-          export PREFER_DOCKER=yes
-          export VERBOSE=yes
-          export NONINTERACTIVE=yes
+          cd $KERNEL_SRC
+          # 编译内核镜像 + 模块 + 设备树（2线程适配 GitHub Actions）
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j2 Image modules dtbs
+          echo "✅ RT 内核编译完成"
 
-          # 执行 Armbian 编译脚本（关键：添加 UNIQUE 参数破坏缓存）
-          ./compile.sh kernel \
-            BOARD=orangepi5-plus \
-            BRANCH=current \
-            RELEASE=bookworm \
-            KERNEL_VERSION=$KERNEL_VERSION \
-            KERNEL_BRANCH=linux-6.12.y \
-            USERPATCHES_ID=rt-$UNIQUE_HASH \
-            CONFIG_DEFCONFIG=userpatches/config/config-distro.config \
-            EXTRA_CONFIG=userpatches/config/config-distro.config
-
-          echo "✅ 内核编译完成（无缓存拦截）"
-
-      - name: Collect Compiled Package
+      - name: Build Deb Package (Kernel Image + Headers + Modules)
         run: |
           set -e
-          # 创建输出目录
-          mkdir -p ${{ github.workspace }}/kernel-output
-          # 查找所有相关内核包（兼容 Armbian 命名规则）
-          find $ARMBIAN_DIR/output/debs -name "*.deb" -type f | grep -E "kernel-rockchip64|linux-image|linux-headers" | while read deb_file; do
-            if [ -f "$deb_file" ]; then
-              cp "$deb_file" ${{ github.workspace }}/kernel-output/
-              echo "✅ 收集到内核包：$(basename $deb_file)"
-            fi
-          done
-          # 验证是否找到包
-          if [ $(ls -1 ${{ github.workspace }}/kernel-output/*.deb 2>/dev/null | wc -l) -eq 0 ]; then
-            echo "❌ 未找到编译后的内核包，打印输出目录内容："
-            ls -la $ARMBIAN_DIR/output/debs/
-            exit 1
-          fi
+          cd $KERNEL_SRC
+          # 生成 deb 包（fakeroot 模拟 root 权限）
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j2 \
+            LOCALVERSION=$KERNEL_LOCALVERSION \
+            KDEB_PKGVERSION=$KERNEL_VERSION$KERNEL_LOCALVERSION \
+            deb-pkg
+          # 复制生成的 deb 包到输出目录
+          cp $WORK_DIR/*.deb $DEB_OUTPUT/
+          echo "✅ deb 包生成完成，文件列表："
+          ls -la $DEB_OUTPUT/
 
-      - name: Upload Kernel Package
+      - name: Package Kernel Modules (Standalone)
+        run: |
+          set -e
+          cd $KERNEL_SRC
+          # 创建模块打包目录
+          MODULES_DIR=$DEB_OUTPUT/kernel-modules-$KERNEL_VERSION$KERNEL_LOCALVERSION
+          mkdir -p $MODULES_DIR/lib/modules
+          # 安装模块到打包目录
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE \
+            INSTALL_MOD_PATH=$MODULES_DIR modules_install
+          # 压缩模块目录
+          tar -zcf $MODULES_DIR.tar.gz -C $DEB_OUTPUT $(basename $MODULES_DIR)
+          rm -rf $MODULES_DIR
+          echo "✅ 独立内核模块包生成完成：$(basename $MODULES_DIR).tar.gz"
+
+      - name: Package Kernel Image & DTBs
+        run: |
+          set -e
+          # 打包内核镜像和设备树
+          IMG_DTB_DIR=$DEB_OUTPUT/kernel-img-dtb-$KERNEL_VERSION$KERNEL_LOCALVERSION
+          mkdir -p $IMG_DTB_DIR/boot
+          # 复制内核镜像
+          cp $KERNEL_SRC/arch/arm64/boot/Image $IMG_DTB_DIR/boot/
+          # 复制香橙派5 Plus 设备树
+          cp $KERNEL_SRC/arch/arm64/boot/dts/rockchip/rk3588-orangepi-5-plus.dtb $IMG_DTB_DIR/boot/
+          # 压缩
+          tar -zcf $IMG_DTB_DIR.tar.gz -C $DEB_OUTPUT $(basename $IMG_DTB_DIR)
+          rm -rf $IMG_DTB_DIR
+          echo "✅ 内核镜像+设备树包生成完成：$(basename $IMG_DTB_DIR).tar.gz"
+
+      - name: Upload All Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: rt-kernel-orangepi5-plus-${{ env.KERNEL_VERSION }}-${{ env.UNIQUE_HASH }}
-          path: ${{ github.workspace }}/kernel-output/*
+          name: RT-Kernel-OrangePi5Plus-$KERNEL_VERSION$KERNEL_LOCALVERSION
+          path: |
+            ${{ env.DEB_OUTPUT }}/*.deb
+            ${{ env.DEB_OUTPUT }}/*.tar.gz
           retention-days: 90
