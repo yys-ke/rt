@@ -166,26 +166,29 @@ jobs:
             exit 1
           fi
 
-      - name: "Step 1 - Generate Kernel Config (New CLI: kernel-config)"
+      # ========== 核心修改：方案三 跳过mconf编译，手动生成配置 ==========
+      - name: "Step 1 - Generate Kernel Config (Skip mconf compile)"
         run: |
           set -e
           cd $ARMBIAN_DIR
-          # 新语法：先执行 kernel-config 生成配置，替代废弃的 KERNEL_CONFIGURE=yes
-          ./compile.sh kernel-config \
-            "BOARD=${{ env.BOARD }}" \
-            "BRANCH=${{ env.BRANCH }}" \
-            "RELEASE=${{ env.RELEASE }}" \
-            "KERNEL_GIT=${{ env.KERNEL_COMMIT }}" \
-            "CONFIG_CUSTOM=$ARMBIAN_DIR/userpatches/config-custom.conf" \
-            "NONINTERACTIVE=yes" \
-            "VERBOSE=yes"
-          echo "✅ 内核配置生成完成（新CLI语法）"
+          # 1. 复制香橙派5 Plus对应架构的默认内核配置
+          mkdir -p sources/linux-${{ env.KERNEL_VERSION }}/
+          cp config/kernel/linux-rockchip64-${{ env.KERNEL_VERSION }}.config sources/linux-${{ env.KERNEL_VERSION }}/.config
+          # 2. 合并自定义RT配置（覆盖默认配置）
+          cat userpatches/config-custom.conf >> sources/linux-${{ env.KERNEL_VERSION }}/.config
+          # 3. 验证配置文件生成成功
+          if [ -f sources/linux-${{ env.KERNEL_VERSION }}/.config ]; then
+            echo "✅ 手动生成内核配置完成，跳过mconf编译"
+          else
+            echo "❌ 配置文件生成失败"
+            exit 1
+          fi
 
       - name: "Step 2 - Compile RT Kernel (New CLI: kernel)"
         run: |
           set -e
           cd $ARMBIAN_DIR
-          # 新语法：再执行 kernel 命令编译内核，删除 KERNEL_CONFIGURE=yes 参数
+          # 保留原有参数，未做其他修改
           ./compile.sh kernel \
             "BOARD=${{ env.BOARD }}" \
             "BRANCH=${{ env.BRANCH }}" \
