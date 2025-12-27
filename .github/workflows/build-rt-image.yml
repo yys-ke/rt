@@ -22,11 +22,11 @@ jobs:
       RELEASE: bookworm
       KERNEL_BRANCH: linux-6.12.y
       KERNEL_COMMIT: 9becd7c25c61ae7e5b6fbfc3c226b1f23af7638c
-      KERNEL_SOURCE: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+      # 内核快照包下载链接
+      KERNEL_SNAPSHOT_URL: "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/snapshot/linux-${{ env.KERNEL_COMMIT }}.tar.gz"
       USERPATCHES_ID: rt
       RT_PATCH_VERSION: rt12
       KERNEL_VERSION: 6.12.43
-      SPLIT_TARBALL_PREFIX: linux-kernel.tar.gz.part-
 
     steps:
       - name: Checkout Local Repository
@@ -118,7 +118,7 @@ jobs:
           BRANCH="${{ env.BRANCH }}"
           RELEASE="${{ env.RELEASE }}"
           KERNEL_GIT="${{ env.KERNEL_COMMIT }}"
-          KERNEL_SOURCE="${{ env.KERNEL_SOURCE }}"
+          KERNEL_SOURCE="${{ env.KERNEL_SNAPSHOT_URL }}"
           KERNEL_BRANCH="${{ env.KERNEL_BRANCH }}"
           KERNEL_CACHE="no"
           USERPATCHES_ID="${{ env.USERPATCHES_ID }}"
@@ -138,27 +138,27 @@ jobs:
           KERNEL_GIT_REPO_LOCAL="yes"
           EOF
 
-      - name: Merge Split Volumes & Unzip Kernel Source
+      # ========== 核心修改：从指定链接下载内核快照包并解压 ==========
+      - name: Download & Unzip Kernel Snapshot
         run: |
           set -e
-          # 1. 检查分卷文件是否存在
-          if ! ls ${{ github.workspace }}/${{ env.SPLIT_TARBALL_PREFIX }}* 1> /dev/null 2>&1; then
-            echo "❌ 仓库根目录未找到分卷文件 ${{ env.SPLIT_TARBALL_PREFIX }}*！"
+          # 1. 下载内核快照包
+          echo "开始从 ${{ env.KERNEL_SNAPSHOT_URL }} 下载内核源码..."
+          wget -q -O ${{ github.workspace }}/linux-kernel.tar.gz ${{ env.KERNEL_SNAPSHOT_URL }}
+          if [ ! -f ${{ github.workspace }}/linux-kernel.tar.gz ]; then
+            echo "❌ 内核快照包下载失败！"
             exit 1
           fi
+          echo "✅ 内核快照包下载完成"
           
-          # 2. 合并所有分卷为完整压缩包
-          cat ${{ github.workspace }}/${{ env.SPLIT_TARBALL_PREFIX }}* > ${{ github.workspace }}/linux-kernel.tar.gz
-          echo "✅ 分卷文件合并完成，生成完整压缩包 linux-kernel.tar.gz"
-          
-          # 3. 创建Armbian内核源码目录
+          # 2. 创建Armbian内核源码目录
           mkdir -p $ARMBIAN_DIR/sources/linux-${{ env.KERNEL_VERSION }}
           
-          # 4. 解压压缩包到目标目录（--strip-components=1 去掉顶层目录）
+          # 3. 解压压缩包到目标目录（--strip-components=1 去掉顶层目录）
           tar -zxf ${{ github.workspace }}/linux-kernel.tar.gz -C $ARMBIAN_DIR/sources/linux-${{ env.KERNEL_VERSION }} --strip-components=1
           echo "✅ 内核压缩包解压到 $ARMBIAN_DIR/sources/linux-${{ env.KERNEL_VERSION }}"
           
-          # 5. 验证内核源码有效性（检查核心文件 Makefile）
+          # 4. 验证内核源码有效性（检查核心文件 Makefile）
           if [ -f $ARMBIAN_DIR/sources/linux-${{ env.KERNEL_VERSION }}/Makefile ]; then
             echo "✅ 内核源码有效，包含核心文件 Makefile"
           else
@@ -185,13 +185,13 @@ jobs:
         run: |
           set -e
           cd $ARMBIAN_DIR
-          # 新语法：再执行 kernel 命令编译内核，删除 KERNEL_CONFIGURE=yes 参数
+          # 新语法：再执行 kernel 命令编译内核，添加单线程参数降低资源占用
           ./compile.sh kernel \
             "BOARD=${{ env.BOARD }}" \
             "BRANCH=${{ env.BRANCH }}" \
             "RELEASE=${{ env.RELEASE }}" \
             "KERNEL_GIT=${{ env.KERNEL_COMMIT }}" \
-            "KERNEL_SOURCE=${{ env.KERNEL_SOURCE }}" \
+            "KERNEL_SOURCE=${{ env.KERNEL_SNAPSHOT_URL }}" \
             "KERNEL_BRANCH=${{ env.KERNEL_BRANCH }}" \
             "KERNEL_CACHE=no" \
             "USERPATCHES_ID=${{ env.USERPATCHES_ID }}" \
@@ -204,6 +204,7 @@ jobs:
             "CUSTOM_HASH=rt-kernel-$(date +%s)" \
             "NONINTERACTIVE=yes" \
             "VERBOSE=yes" \
+            "MAKE_JOBS=1" \
             "SET_OWNER_TO_UID=$(id -u)"
 
       - name: Verify Compiled Artifacts
