@@ -27,7 +27,6 @@ jobs:
       RT_PATCH_VERSION: rt12
       KERNEL_VERSION: 6.12.43
       SPLIT_TARBALL_PREFIX: linux-kernel.tar.gz.part-
-      # 定义你根目录的配置文件名
       CUSTOM_CONFIG_FILE: config-6.12.43-current-rockchip64
 
     steps:
@@ -64,10 +63,10 @@ jobs:
           cd $ARMBIAN_DIR
           git submodule update --init --recursive
 
-          # 禁用Armbian缓存检测
-          sudo sed -i 's/artifact_is_available_in_remote_cache() {/artifact_is_available_in_remote_cache() { return 1;/g' $ARMBIAN_DIR/lib/functions/artifacts/artifacts-obtain.sh
-          sudo sed -i 's/artifact_is_available_in_local_cache() {/artifact_is_available_in_local_cache() { return 1;/g' $ARMBIAN_DIR/lib/functions/artifacts/artifacts-obtain.sh
-          echo "✅ 已修改Armbian核心脚本，禁用缓存检测"
+          # 禁用Armbian缓存检测（强化版）
+          sudo sed -i 's/artifact_is_available_in_remote_cache() {/artifact_is_available_in_remote_cache() { return 0;/g' $ARMBIAN_DIR/lib/functions/artifacts/artifacts-obtain.sh
+          sudo sed -i 's/artifact_is_available_in_local_cache() {/artifact_is_available_in_local_cache() { return 0;/g' $ARMBIAN_DIR/lib/functions/artifacts/artifacts-obtain.sh
+          echo "✅ 已彻底禁用Armbian缓存检测"
 
       - name: Prepare User Patches & Configs (Fix Path/Name)
         run: |
@@ -102,6 +101,7 @@ jobs:
       - name: Clean All Caches (Ultra Deep)
         run: |
           set -e
+          # 彻底清空Armbian所有缓存目录
           rm -rf $ARMBIAN_DIR/cache/* || true
           rm -rf $ARMBIAN_DIR/output/* || true
           rm -rf $ARMBIAN_DIR/sources/* || true
@@ -109,7 +109,9 @@ jobs:
           sudo rm -rf /armbian/* || true
           docker system prune -af || true
           rm -rf $ARMBIAN_DIR/.cache/* || true
-          echo "✅ 深度清理所有缓存完成"
+          # 额外清空Docker缓存（Armbian基于Docker运行）
+          docker builder prune -af || true
+          echo "✅ 深度清理所有缓存完成（包括Docker）"
 
       - name: Write Core Config (Skip Remote Git Check)
         run: |
@@ -122,22 +124,25 @@ jobs:
           KERNEL_GIT="${{ env.KERNEL_COMMIT }}"
           KERNEL_SOURCE="${{ env.KERNEL_SOURCE }}"
           KERNEL_BRANCH="${{ env.KERNEL_BRANCH }}"
-          KERNEL_CACHE="no"
+          KERNEL_CACHE=no
           USERPATCHES_ID="${{ env.USERPATCHES_ID }}"
-          # 彻底禁用缓存
-          ARMBIAN_CACHE_MODE="none"
-          SKIP_REMOTE_CACHE="yes"
-          SKIP_LOCAL_CACHE="yes"
-          FORCE_REBUILD="yes"
-          USE_CCACHE="no"
+          # 彻底禁用所有缓存
+          ARMBIAN_CACHE_MODE=none
+          SKIP_REMOTE_CACHE=yes
+          SKIP_LOCAL_CACHE=yes
+          FORCE_REBUILD=yes
+          USE_CCACHE=no
+          # 强制全量编译（关键：禁用缓存的核心参数）
+          BUILD_ALL=yes
+          NO_CACHE=yes
           # 强制应用自定义配置
           CONFIG_CUSTOM="$ARMBIAN_DIR/userpatches/config-custom.conf"
-          # 破坏缓存哈希
-          CUSTOM_HASH="rt-kernel-$(date +%s)"
-          NONINTERACTIVE="yes"
-          VERBOSE="yes"
-          # 关键配置：强制使用本地内核源码，跳过远程Git仓库检查
-          KERNEL_GIT_REPO_LOCAL="yes"
+          # 破坏缓存哈希（新增随机值，确保哈希不匹配）
+          CUSTOM_HASH="rt-kernel-$(date +%s)-$(openssl rand -hex 4)"
+          NONINTERACTIVE=yes
+          VERBOSE=yes
+          # 关键配置：强制使用本地内核源码
+          KERNEL_GIT_REPO_LOCAL=yes
           EOF
 
       - name: Merge Split Volumes & Unzip Kernel Source
@@ -156,11 +161,11 @@ jobs:
           # 3. 创建Armbian内核源码目录
           mkdir -p $ARMBIAN_DIR/sources/linux-${{ env.KERNEL_VERSION }}
           
-          # 4. 解压压缩包到目标目录（--strip-components=1 去掉顶层目录）
+          # 4. 解压压缩包到目标目录
           tar -zxf ${{ github.workspace }}/linux-kernel.tar.gz -C $ARMBIAN_DIR/sources/linux-${{ env.KERNEL_VERSION }} --strip-components=1
           echo "✅ 内核压缩包解压到 $ARMBIAN_DIR/sources/linux-${{ env.KERNEL_VERSION }}"
           
-          # 5. 验证内核源码有效性（检查核心文件 Makefile）
+          # 5. 验证内核源码有效性
           if [ -f $ARMBIAN_DIR/sources/linux-${{ env.KERNEL_VERSION }}/Makefile ]; then
             echo "✅ 内核源码有效，包含核心文件 Makefile"
           else
@@ -168,33 +173,31 @@ jobs:
             exit 1
           fi
 
-      # ========== 核心修改：使用你根目录的自定义配置文件 ==========
-      - name: "Step 1 - Generate Kernel Config (Use custom config file)"
+      # 配置阶段：仅这里用单线程
+      - name: "Step 1 - Generate Kernel Config (Use custom config + single thread)"
         run: |
           set -e
           cd $ARMBIAN_DIR
-          # 1. 检查根目录的配置文件是否存在
+          # 1. 检查根目录配置文件
           if [ ! -f ${{ github.workspace }}/${{ env.CUSTOM_CONFIG_FILE }} ]; then
             echo "❌ 根目录未找到配置文件 ${{ env.CUSTOM_CONFIG_FILE }}！"
             exit 1
           fi
-          # 2. 复制你根目录的配置文件到内核源码目录，命名为.config
+          # 2. 复制配置文件
           cp ${{ github.workspace }}/${{ env.CUSTOM_CONFIG_FILE }} sources/linux-${{ env.KERNEL_VERSION }}/.config
-          # 3. 合并自定义RT配置（覆盖原有配置）
+          # 3. 合并自定义RT配置
           cat userpatches/config-custom.conf >> sources/linux-${{ env.KERNEL_VERSION }}/.config
-          # 4. 验证配置文件生成成功
-          if [ -f sources/linux-${{ env.KERNEL_VERSION }}/.config ]; then
-            echo "✅ 已使用根目录的 ${{ env.CUSTOM_CONFIG_FILE }} 生成内核配置"
-          else
-            echo "❌ 配置文件复制失败"
-            exit 1
-          fi
+          # 4. 单线程补全配置
+          cd sources/linux-${{ env.KERNEL_VERSION }}
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j1 olddefconfig
+          echo "✅ 配置生成完成（单线程）"
 
-      - name: "Step 2 - Compile RT Kernel (New CLI: kernel)"
+      # 编译阶段：强制本地编译，不限制线程
+      - name: "Step 2 - Compile RT Kernel (Force local build)"
         run: |
           set -e
           cd $ARMBIAN_DIR
-          # 保留原有参数，未做其他修改
+          # 新增更多禁用缓存的参数，强制本地编译
           ./compile.sh kernel \
             "BOARD=${{ env.BOARD }}" \
             "BRANCH=${{ env.BRANCH }}" \
@@ -209,8 +212,10 @@ jobs:
             "SKIP_LOCAL_CACHE=yes" \
             "FORCE_REBUILD=yes" \
             "USE_CCACHE=no" \
+            "BUILD_ALL=yes" \
+            "NO_CACHE=yes" \
             "CONFIG_CUSTOM=$ARMBIAN_DIR/userpatches/config-custom.conf" \
-            "CUSTOM_HASH=rt-kernel-$(date +%s)" \
+            "CUSTOM_HASH=rt-kernel-$(date +%s)-$(openssl rand -hex 4)" \
             "NONINTERACTIVE=yes" \
             "VERBOSE=yes" \
             "SET_OWNER_TO_UID=$(id -u)"
