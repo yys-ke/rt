@@ -2,7 +2,7 @@ name: Cross Compile RT Kernel (Multi-Thread Compile) for Orange Pi 5 Plus
 
 on:
   push:
-    branches: [ main ]
+    branches: [ kernel ]
   workflow_dispatch:
 
 concurrency:
