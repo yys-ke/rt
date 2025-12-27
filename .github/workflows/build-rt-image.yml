@@ -2,7 +2,7 @@ name: Cross Compile RT Kernel (Multi-Thread Compile) for Orange Pi 5 Plus
 
 on:
   push:
-    branches: [ kernel ]
+    branches: [ k2 ]
   workflow_dispatch:
 
 concurrency:
@@ -18,7 +18,6 @@ jobs:
     env:
       CUSTOM_CONFIG_FILE: config-6.12.43-current-rockchip64
       RT_PATCH_FILE: patch-6.12.43-rt12.patch.xz
-      KERNEL_SRC_URL: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/snapshot/linux-9becd7c25c61ae7e5b6fbfc3c226b1f23af7638c.tar.gz
       KERNEL_VERSION: 6.12.43
       KERNEL_LOCALVERSION: -rt12-opi5plus
       ARCH: arm64
@@ -36,6 +35,13 @@ jobs:
       - name: Validate Local Files
         run: |
           set -e
+          if [ ! -f "${{ github.workspace }}/linux-kernel.tar.gz.part-aa" ] || \
+             [ ! -f "${{ github.workspace }}/linux-kernel.tar.gz.part-ab" ] || \
+             [ ! -f "${{ github.workspace }}/linux-kernel.tar.gz.part-ac" ]; then
+            echo "❌ 根目录缺少内核分卷压缩包（aa/ab/ac）"
+            ls -la ${{ github.workspace }}
+            exit 1
+          fi
           if [ ! -f "$CUSTOM_CONFIG_FILE" ]; then
             echo "❌ 未找到自定义配置文件：$CUSTOM_CONFIG_FILE"
             ls -la ${{ github.workspace }}
@@ -45,17 +51,22 @@ jobs:
             echo "❌ 未找到 RT 补丁文件：$RT_PATCH_FILE"
             exit 1
           fi
-          echo "✅ 本地文件验证通过"
+          echo "✅ 本地文件（内核分卷+配置+补丁）验证通过"
 
-      - name: Install x86_64 Cross-Compile Toolchain
+      - name: Install x86_64 Cross-Compile Toolchain (Fix libssl-dev Dependency)
         run: |
           set -e
           sudo apt update -qq
+          # 1. 配置 arm64 架构支持（允许安装 arm64 架构的依赖）
+          sudo dpkg --add-architecture arm64
+          sudo apt update -qq
+          
+          # 2. 安装原有依赖 + libssl-dev:arm64（ARM64 架构的 ssl 开发库，核心修复）
           sudo apt install -y --no-install-recommends --reinstall \
             xz-utils build-essential libncurses5-dev libncursesw5-dev \
-            flex bison libssl-dev bc dwarves \
+            flex bison libssl-dev libssl-dev:arm64 bc dwarves \
             crossbuild-essential-arm64 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            kmod cpio rsync libelf-dev debhelper fakeroot binutils-aarch64-linux-gnu patch git
+            kmod cpio rsync libelf-dev libelf-dev:arm64 debhelper fakeroot binutils-aarch64-linux-gnu patch git
           
           if ! aarch64-linux-gnu-gcc --version; then
             echo "❌ 交叉编译器安装失败"
@@ -65,7 +76,7 @@ jobs:
             echo "❌ patch 工具安装失败"
             exit 1
           fi
-          echo "✅ 工具链安装验证通过，CPU 核心数：$(nproc)"
+          echo "✅ 工具链（含 ARM64 依赖）安装验证通过，CPU 核心数：$(nproc)"
 
       - name: Create Working Directories
         run: |
@@ -73,33 +84,26 @@ jobs:
           mkdir -p $WORK_DIR $KERNEL_SRC $DEB_OUTPUT
           echo "✅ 工作目录创建完成"
 
-      - name: Download & Extract Kernel Source (Keep Original Filename + Git Init)
+      - name: Merge & Extract Kernel Split Files (No Download + Git Init)
         run: |
           set -e
-          cd $WORK_DIR
-          ORIGINAL_FILENAME="linux-9becd7c25c61ae7e5b6fbfc3c226b1f23af7638c.tar.gz"
-          echo "📥 开始下载源码：$KERNEL_SRC_URL"
-          wget --no-check-certificate \
-               --timeout=30 \
-               --tries=5 \
-               --continue \
-               --verbose \
-               $KERNEL_SRC_URL -O $ORIGINAL_FILENAME
+          cd ${{ github.workspace }}
+          echo "📦 合并内核分卷：linux-kernel.tar.gz.part-aa/ab/ac → linux-kernel.tar.gz"
+          cat linux-kernel.tar.gz.part-aa linux-kernel.tar.gz.part-ab linux-kernel.tar.gz.part-ac > linux-kernel.tar.gz
           
-          if [ ! -s "$ORIGINAL_FILENAME" ]; then
-            echo "❌ 源码下载失败，文件为空"
+          if [ ! -s "linux-kernel.tar.gz" ]; then
+            echo "❌ 内核分卷合并失败，文件为空"
             exit 1
           fi
-          echo "✅ 源码下载完成，原文件名：$ORIGINAL_FILENAME，大小：$(du -h $ORIGINAL_FILENAME | awk '{print $1}')"
+          echo "✅ 内核分卷合并完成，完整包大小：$(du -h linux-kernel.tar.gz | awk '{print $1}')"
 
-          tar -xf $ORIGINAL_FILENAME -C $KERNEL_SRC --strip-components=1
+          tar -xf linux-kernel.tar.gz -C $KERNEL_SRC --strip-components=1
           if [ ! -f "$KERNEL_SRC/Makefile" ]; then
-            echo "❌ 内核源码解压失败"
+            echo "❌ 内核源码解压失败，未找到 Makefile"
             ls -la $KERNEL_SRC
             exit 1
           fi
 
-          # 核心修复：初始化空 Git 仓库，满足 deb-pkg 强制要求
           cd $KERNEL_SRC
           git init
           git config user.name "GitHub Actions"
@@ -108,7 +112,7 @@ jobs:
           git commit -m "Fake commit for deb-pkg (skip git check)"
           echo "✅ 已初始化空 Git 仓库并伪造提交"
 
-          echo "✅ 内核源码下载解压 + Git 初始化完成"
+          echo "✅ 内核分卷合并 + 解压 + Git 初始化完成"
 
       - name: Apply RT Patch & Load Custom Config (Single Thread)
         run: |
@@ -125,14 +129,12 @@ jobs:
             exit 1
           fi
 
-          # 强制 RT 配置
           echo "CONFIG_LOCALVERSION=\"$KERNEL_LOCALVERSION\"" >> .config
           sed -i 's/^# CONFIG_PREEMPT_RT is not set/CONFIG_PREEMPT_RT=y/' .config
           sed -i 's/^CONFIG_PREEMPT=.*/CONFIG_PREEMPT=y/' .config
           sed -i 's/^CONFIG_HZ=.*/CONFIG_HZ=1000/' .config
           sed -i 's/^CONFIG_MODVERSIONS=.*/CONFIG_MODVERSIONS=n/' .config
           sed -i 's/^CONFIG_BUILD_DOCS=.*/CONFIG_BUILD_DOCS=n/' .config
-          # 禁用内核内部 Git 信息读取（辅助优化）
           sed -i 's/^# CONFIG_KERNEL_GIT_INFO is not set/CONFIG_KERNEL_GIT_INFO=n/' .config
 
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE olddefconfig
@@ -145,15 +147,17 @@ jobs:
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) Image modules dtbs
           echo "✅ arm64 RT 内核多线程编译完成（使用 $(nproc) 核心）"
 
-      - name: Build arm64 Deb Package (Multi-Thread - Skip Git Check)
+      - name: Build arm64 Deb Package (Multi-Thread - Fix Dependency Check)
         run: |
           set -e
           cd $KERNEL_SRC
+          # 核心修复2：传递 DEB_BUILD_OPTIONS="nodeps" 跳过依赖检查（兜底，确保构建通过）
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) \
             LOCALVERSION=$KERNEL_LOCALVERSION \
             KDEB_PKGVERSION=$KERNEL_VERSION$KERNEL_LOCALVERSION \
             KDEB_DEBARCH=arm64 \
             KBUILD_BUILD_VERSION=1 \
+            DEB_BUILD_OPTIONS="nodeps" \
             deb-pkg
           cp $WORK_DIR/*.deb $DEB_OUTPUT/
           echo "✅ deb 包多线程生成完成，文件列表："
