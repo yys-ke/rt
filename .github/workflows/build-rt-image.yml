@@ -2,7 +2,7 @@ name: Cross Compile RT Kernel (Multi-Thread Compile) for Orange Pi 5 Plus
 
 on:
   push:
-    branches: [ kernel ]
+    branches: [ main ]
   workflow_dispatch:
 
 concurrency:
@@ -55,7 +55,7 @@ jobs:
             xz-utils build-essential libncurses5-dev libncursesw5-dev \
             flex bison libssl-dev bc dwarves \
             crossbuild-essential-arm64 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            kmod cpio rsync libelf-dev debhelper fakeroot binutils-aarch64-linux-gnu patch
+            kmod cpio rsync libelf-dev debhelper fakeroot binutils-aarch64-linux-gnu patch git
           
           if ! aarch64-linux-gnu-gcc --version; then
             echo "❌ 交叉编译器安装失败"
@@ -73,7 +73,7 @@ jobs:
           mkdir -p $WORK_DIR $KERNEL_SRC $DEB_OUTPUT
           echo "✅ 工作目录创建完成"
 
-      - name: Download & Extract Kernel Source (Keep Original Filename)
+      - name: Download & Extract Kernel Source (Keep Original Filename + Git Init)
         run: |
           set -e
           cd $WORK_DIR
@@ -98,7 +98,17 @@ jobs:
             ls -la $KERNEL_SRC
             exit 1
           fi
-          echo "✅ 内核源码下载解压完成"
+
+          # 核心修复：初始化空 Git 仓库，满足 deb-pkg 强制要求
+          cd $KERNEL_SRC
+          git init
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add .
+          git commit -m "Fake commit for deb-pkg (skip git check)"
+          echo "✅ 已初始化空 Git 仓库并伪造提交"
+
+          echo "✅ 内核源码下载解压 + Git 初始化完成"
 
       - name: Apply RT Patch & Load Custom Config (Single Thread)
         run: |
@@ -122,11 +132,9 @@ jobs:
           sed -i 's/^CONFIG_HZ=.*/CONFIG_HZ=1000/' .config
           sed -i 's/^CONFIG_MODVERSIONS=.*/CONFIG_MODVERSIONS=n/' .config
           sed -i 's/^CONFIG_BUILD_DOCS=.*/CONFIG_BUILD_DOCS=n/' .config
-          # 禁用内核编译信息中的 Git 依赖（核心修复 1）
+          # 禁用内核内部 Git 信息读取（辅助优化）
           sed -i 's/^# CONFIG_KERNEL_GIT_INFO is not set/CONFIG_KERNEL_GIT_INFO=n/' .config
-          sed -i 's/^# CONFIG_STACK_VALIDATION is not set/CONFIG_STACK_VALIDATION=n/' .config
 
-          # 配置步骤保持单线程，避免冲突
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE olddefconfig
           echo "✅ 内核配置完成"
 
@@ -134,7 +142,6 @@ jobs:
         run: |
           set -e
           cd $KERNEL_SRC
-          # 使用全部 CPU 核心编译，大幅提升速度
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) Image modules dtbs
           echo "✅ arm64 RT 内核多线程编译完成（使用 $(nproc) 核心）"
 
@@ -142,7 +149,6 @@ jobs:
         run: |
           set -e
           cd $KERNEL_SRC
-          # deb 打包启用多线程 + 手动指定构建版本（核心修复 2）
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) \
             LOCALVERSION=$KERNEL_LOCALVERSION \
             KDEB_PKGVERSION=$KERNEL_VERSION$KERNEL_LOCALVERSION \
@@ -159,7 +165,6 @@ jobs:
           cd $KERNEL_SRC
           MODULES_DIR=$DEB_OUTPUT/kernel-modules-$KERNEL_VERSION$KERNEL_LOCALVERSION
           mkdir -p $MODULES_DIR/lib/modules
-          # 模块安装保持单线程，避免文件覆盖冲突
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE INSTALL_MOD_PATH=$MODULES_DIR modules_install
           tar -zcf $MODULES_DIR.tar.gz -C $DEB_OUTPUT $(basename $MODULES_DIR)
           rm -rf $MODULES_DIR
