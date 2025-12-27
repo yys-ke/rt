@@ -1,4 +1,4 @@
-name: Cross Compile RT Kernel (Single Thread) for Orange Pi 5 Plus
+name: Cross Compile RT Kernel (Multi-Thread Compile) for Orange Pi 5 Plus
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: cross-compile-rt-kernel-single-thread
+  group: cross-compile-rt-kernel-multi-thread
   cancel-in-progress: true
 
 jobs:
@@ -65,7 +65,7 @@ jobs:
             echo "❌ patch 工具安装失败"
             exit 1
           fi
-          echo "✅ 工具链安装验证通过"
+          echo "✅ 工具链安装验证通过，CPU 核心数：$(nproc)"
 
       - name: Create Working Directories
         run: |
@@ -73,7 +73,6 @@ jobs:
           mkdir -p $WORK_DIR $KERNEL_SRC $DEB_OUTPUT
           echo "✅ 工作目录创建完成"
 
-      # ========== 修复后的下载解压步骤 ==========
       - name: Download & Extract Kernel Source (Keep Original Filename)
         run: |
           set -e
@@ -93,10 +92,6 @@ jobs:
           fi
           echo "✅ 源码下载完成，原文件名：$ORIGINAL_FILENAME，大小：$(du -h $ORIGINAL_FILENAME | awk '{print $1}')"
 
-          # 可选重命名，取消注释即可
-          # mv $ORIGINAL_FILENAME kernel-src.tar.gz
-          # ORIGINAL_FILENAME="kernel-src.tar.gz"
-
           tar -xf $ORIGINAL_FILENAME -C $KERNEL_SRC --strip-components=1
           if [ ! -f "$KERNEL_SRC/Makefile" ]; then
             echo "❌ 内核源码解压失败"
@@ -105,7 +100,7 @@ jobs:
           fi
           echo "✅ 内核源码下载解压完成"
 
-      - name: Apply RT Patch & Load Custom Config (No Multi-Thread)
+      - name: Apply RT Patch & Load Custom Config (Single Thread)
         run: |
           set -e
           cd $KERNEL_SRC
@@ -120,42 +115,51 @@ jobs:
             exit 1
           fi
 
+          # 强制 RT 配置
           echo "CONFIG_LOCALVERSION=\"$KERNEL_LOCALVERSION\"" >> .config
           sed -i 's/^# CONFIG_PREEMPT_RT is not set/CONFIG_PREEMPT_RT=y/' .config
           sed -i 's/^CONFIG_PREEMPT=.*/CONFIG_PREEMPT=y/' .config
           sed -i 's/^CONFIG_HZ=.*/CONFIG_HZ=1000/' .config
           sed -i 's/^CONFIG_MODVERSIONS=.*/CONFIG_MODVERSIONS=n/' .config
           sed -i 's/^CONFIG_BUILD_DOCS=.*/CONFIG_BUILD_DOCS=n/' .config
+          # 禁用内核编译信息中的 Git 依赖（核心修复 1）
+          sed -i 's/^# CONFIG_KERNEL_GIT_INFO is not set/CONFIG_KERNEL_GIT_INFO=n/' .config
+          sed -i 's/^# CONFIG_STACK_VALIDATION is not set/CONFIG_STACK_VALIDATION=n/' .config
 
+          # 配置步骤保持单线程，避免冲突
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE olddefconfig
           echo "✅ 内核配置完成"
 
-      - name: Cross Compile RT Kernel (Single Thread Only)
+      - name: Cross Compile RT Kernel (Multi-Thread - Auto Core Count)
         run: |
           set -e
           cd $KERNEL_SRC
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE Image modules dtbs
-          echo "✅ arm64 RT 内核单线程编译完成"
+          # 使用全部 CPU 核心编译，大幅提升速度
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) Image modules dtbs
+          echo "✅ arm64 RT 内核多线程编译完成（使用 $(nproc) 核心）"
 
-      - name: Build arm64 Deb Package (Single Thread)
+      - name: Build arm64 Deb Package (Multi-Thread - Skip Git Check)
         run: |
           set -e
           cd $KERNEL_SRC
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE \
+          # deb 打包启用多线程 + 手动指定构建版本（核心修复 2）
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) \
             LOCALVERSION=$KERNEL_LOCALVERSION \
             KDEB_PKGVERSION=$KERNEL_VERSION$KERNEL_LOCALVERSION \
             KDEB_DEBARCH=arm64 \
+            KBUILD_BUILD_VERSION=1 \
             deb-pkg
           cp $WORK_DIR/*.deb $DEB_OUTPUT/
-          echo "✅ deb 包生成完成，文件列表："
+          echo "✅ deb 包多线程生成完成，文件列表："
           ls -la $DEB_OUTPUT/
 
-      - name: Package Standalone Modules & Image
+      - name: Package Standalone Modules & Image (Single Thread)
         run: |
           set -e
           cd $KERNEL_SRC
           MODULES_DIR=$DEB_OUTPUT/kernel-modules-$KERNEL_VERSION$KERNEL_LOCALVERSION
           mkdir -p $MODULES_DIR/lib/modules
+          # 模块安装保持单线程，避免文件覆盖冲突
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE INSTALL_MOD_PATH=$MODULES_DIR modules_install
           tar -zcf $MODULES_DIR.tar.gz -C $DEB_OUTPUT $(basename $MODULES_DIR)
           rm -rf $MODULES_DIR
