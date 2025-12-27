@@ -2,7 +2,7 @@ name: Cross Compile RT Kernel (Deb + Modules) for Orange Pi 5 Plus
 
 on:
   push:
-    branches: [ kernel ]
+    branches: [ main ]
   workflow_dispatch:
 
 concurrency:
@@ -22,7 +22,7 @@ jobs:
       KERNEL_SRC_URL: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/snapshot/linux-9becd7c25c61ae7e5b6fbfc3c226b1f23af7638c.tar.gz
       KERNEL_VERSION: 6.12.43
       KERNEL_LOCALVERSION: -rt12-opi5plus
-      # 交叉编译核心参数（关键：变量末尾无空格）
+      # 交叉编译核心参数
       ARCH: arm64
       CROSS_COMPILE: aarch64-linux-gnu-
       # 工作目录
@@ -50,33 +50,26 @@ jobs:
           fi
           echo "✅ 本地文件验证通过"
 
-      - name: Install x86_64 Cross-Compile Toolchain (Fixed)
+      - name: Install x86_64 Cross-Compile Toolchain
         run: |
           set -e
           sudo apt update -qq
-          # 强制重装交叉编译工具链，确保完整安装
           sudo apt install -y --no-install-recommends --reinstall \
             xz-utils build-essential libncurses5-dev libncursesw5-dev \
             flex bison libssl-dev bc dwarves \
             crossbuild-essential-arm64 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            kmod cpio rsync libelf-dev debhelper fakeroot binutils-aarch64-linux-gnu
+            kmod cpio rsync libelf-dev debhelper fakeroot binutils-aarch64-linux-gnu patch
           
-          # ========== 修复的核心：正确验证交叉编译器 ==========
-          # 方法1：直接调用编译器（推荐）
+          # 验证编译器和 patch 工具
           if ! aarch64-linux-gnu-gcc --version; then
-            echo "❌ 交叉编译器 aarch64-linux-gnu-gcc 未安装成功"
-            # 打印已安装的包，排查问题
-            dpkg -l | grep aarch64-linux-gnu
+            echo "❌ 交叉编译器安装失败"
             exit 1
           fi
-          # 方法2：用变量拼接（无空格！）
-          if ! ${CROSS_COMPILE}gcc --version; then
-            echo "❌ 变量拼接方式验证编译器失败"
+          if ! patch --version; then
+            echo "❌ patch 工具安装失败"
             exit 1
           fi
-
-          echo "✅ 交叉编译工具链安装验证通过"
-          echo "编译器版本：$(aarch64-linux-gnu-gcc --version | head -n1)"
+          echo "✅ 工具链安装验证通过"
 
       - name: Create Working Directories
         run: |
@@ -96,22 +89,27 @@ jobs:
           fi
           echo "✅ 内核源码下载解压完成"
 
-      - name: Apply RT Patch & Load Custom Config
+      - name: Apply RT Patch & Load Custom Config (Fixed Patch Command)
         run: |
           set -e
           cd $KERNEL_SRC
+          # 1. 复制自定义配置
           cp ${{ github.workspace }}/$CUSTOM_CONFIG_FILE ./.config
           echo "✅ 已加载自定义配置：$CUSTOM_CONFIG_FILE"
 
-          # 单线程打补丁，避免冲突
-          xz -d -c ${{ github.workspace }}/$RT_PATCH_FILE | patch -p1 -j1
-          if [ $? -eq 0 ]; then
-            echo "✅ RT 补丁应用成功"
+          # 2. 修复核心：原生 patch 命令不支持 -j 参数，直接用 -p1
+          # -p1：忽略补丁中的第一层目录（适配内核补丁格式）
+          # --verbose：打印补丁应用详情，方便排查问题
+          xz -d -c ${{ github.workspace }}/$RT_PATCH_FILE | patch -p1 --verbose
+          if [ $? -eq 0 ] || [ $? -eq 1 ]; then
+            # patch 返回 1 表示部分文件已存在（正常），返回 0 表示完全成功
+            echo "✅ RT 补丁应用成功（返回码：$?）"
           else
-            echo "⚠️ RT 补丁应用有警告，继续执行"
+            echo "❌ RT 补丁应用失败（返回码：$?）"
+            exit 1
           fi
 
-          # 强制 RT 配置
+          # 3. 强制开启 RT 配置
           echo "CONFIG_LOCALVERSION=\"$KERNEL_LOCALVERSION\"" >> .config
           sed -i 's/^# CONFIG_PREEMPT_RT is not set/CONFIG_PREEMPT_RT=y/' .config
           sed -i 's/^CONFIG_PREEMPT=.*/CONFIG_PREEMPT=y/' .config
@@ -119,7 +117,7 @@ jobs:
           sed -i 's/^CONFIG_MODVERSIONS=.*/CONFIG_MODVERSIONS=n/' .config
           sed -i 's/^CONFIG_BUILD_DOCS=.*/CONFIG_BUILD_DOCS=n/' .config
 
-          # 单线程补全配置
+          # 4. 单线程补全配置
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j1 olddefconfig
           echo "✅ 内核配置完成"
 
@@ -127,15 +125,13 @@ jobs:
         run: |
           set -e
           cd $KERNEL_SRC
-          # 编译核心产物
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j2 Image modules dtbs
           echo "✅ arm64 RT 内核交叉编译完成"
 
-      - name: Build arm64 Deb Package (Cross-Compile Mode)
+      - name: Build arm64 Deb Package
         run: |
           set -e
           cd $KERNEL_SRC
-          # 生成 arm64 架构 deb 包
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j2 \
             LOCALVERSION=$KERNEL_LOCALVERSION \
             KDEB_PKGVERSION=$KERNEL_VERSION$KERNEL_LOCALVERSION \
@@ -145,7 +141,7 @@ jobs:
           echo "✅ deb 包生成完成，文件列表："
           ls -la $DEB_OUTPUT/
 
-      - name: Package Standalone Kernel Modules & Image
+      - name: Package Standalone Modules & Image
         run: |
           set -e
           cd $KERNEL_SRC
@@ -161,11 +157,14 @@ jobs:
           mkdir -p $IMG_DTB_DIR/boot
           cp arch/arm64/boot/Image $IMG_DTB_DIR/boot/
           DTB_FILE=rk3588-orangepi-5-plus.dtb
-          [ -f arch/arm64/boot/dts/rockchip/$DTB_FILE ] && cp $_ $IMG_DTB_DIR/boot/
+          if [ -f "arch/arm64/boot/dts/rockchip/$DTB_FILE" ]; then
+            cp "arch/arm64/boot/dts/rockchip/$DTB_FILE" $IMG_DTB_DIR/boot/
+            echo "✅ 设备树 $DTB_FILE 复制完成"
+          fi
           tar -zcf $IMG_DTB_DIR.tar.gz -C $DEB_OUTPUT $(basename $IMG_DTB_DIR)
           rm -rf $IMG_DTB_DIR
 
-          echo "✅ 独立模块包和镜像包生成完成"
+          echo "✅ 独立包生成完成"
 
       - name: Upload All Artifacts
         uses: actions/upload-artifact@v4
