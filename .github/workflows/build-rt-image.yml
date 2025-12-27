@@ -53,11 +53,10 @@ jobs:
           fi
           echo "✅ 本地文件（内核分卷+配置+补丁）验证通过"
 
-      - name: Install x86_64 Cross-Compile Toolchain (Restore Original, Avoid ARM64 Repo)
+      - name: Install x86_64 Cross-Compile Toolchain (Original Version)
         run: |
           set -e
           sudo apt update -qq
-          # 核心：移除 arm64 架构配置，恢复原有依赖列表，避免 404 错误
           sudo apt install -y --no-install-recommends --reinstall \
             xz-utils build-essential libncurses5-dev libncursesw5-dev \
             flex bison libssl-dev bc dwarves \
@@ -143,19 +142,19 @@ jobs:
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) Image modules dtbs
           echo "✅ arm64 RT 内核多线程编译完成（使用 $(nproc) 核心）"
 
-      - name: Build arm64 Deb Package (Force Skip Dependency Check, Core Fix)
+      - name: Build arm64 Deb Package (Inject -d Flag to dpkg-buildpackage, Ultimate Fix)
         run: |
           set -e
           cd $KERNEL_SRC
-          # 核心：通过 2 个参数强制跳过依赖检查，彻底绕过 libssl-dev 缺失和 dpkg 检查
-          # 1. KDEB_BUILD_OPTIONS="nodeps"：内核 deb-pkg 专属参数，跳过依赖检查
-          # 2. 直接传递 -d 给 dpkg-buildpackage（兜底）
+          # 核心终极修复：通过 OVERRIDE_DPKG_BUILDPACKAGE 直接注入 -d 参数，强制跳过依赖检查
+          # 该变量会覆盖内核脚本中 dpkg-buildpackage 的调用参数，优先级最高
+          export OVERRIDE_DPKG_BUILDPACKAGE="dpkg-buildpackage -d"
+          
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) \
             LOCALVERSION=$KERNEL_LOCALVERSION \
             KDEB_PKGVERSION=$KERNEL_VERSION$KERNEL_LOCALVERSION \
             KDEB_DEBARCH=arm64 \
             KBUILD_BUILD_VERSION=1 \
-            KDEB_BUILD_OPTIONS="nodeps" \
             deb-pkg
           cp $WORK_DIR/*.deb $DEB_OUTPUT/
           echo "✅ deb 包多线程生成完成，文件列表："
