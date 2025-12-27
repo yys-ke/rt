@@ -1,4 +1,4 @@
-name: Cross Compile RT Kernel (Multi-Thread Compile) for Orange Pi 5 Plus
+name: Native Build RT Kernel (ARM64 Linux) for Orange Pi 5 Plus
 
 on:
   push:
@@ -6,11 +6,12 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: cross-compile-rt-kernel-multi-thread
+  group: arm64-native-rt-kernel
   cancel-in-progress: true
 
 jobs:
-  cross-compile:
+  native-build:
+    # 使用 GitHub 官方 ARM64 Linux 运行器
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -22,7 +23,7 @@ jobs:
       KERNEL_VERSION: 6.12.43
       KERNEL_LOCALVERSION: -rt12-opi5plus
       ARCH: arm64
-      CROSS_COMPILE: aarch64-linux-gnu-
+      # 原生编译：移除所有交叉编译参数
       WORK_DIR: ${{ github.workspace }}/work
       KERNEL_SRC: ${{ github.workspace }}/kernel-src
       DEB_OUTPUT: ${{ github.workspace }}/kernel-deb-output
@@ -45,27 +46,23 @@ jobs:
             echo "❌ 未找到 RT 补丁文件：$RT_PATCH_FILE"
             exit 1
           fi
-          echo "✅ 本地文件验证通过"
+          # 验证当前运行器架构是 ARM64
+          if [ $(uname -m) != "aarch64" ]; then
+            echo "❌ 当前运行器不是 ARM64 架构，而是 $(uname -m)"
+            exit 1
+          fi
+          echo "✅ 本地文件验证通过，运行器架构：$(uname -m)，CPU 核心数：$(nproc)"
 
-      - name: Install x86_64 Cross-Compile Toolchain
+      - name: Install ARM64 Native Build Dependencies
         run: |
           set -e
           sudo apt update -qq
+          # 原生编译依赖：仅需 ARM64 包，无需多架构/交叉编译器
           sudo apt install -y --no-install-recommends --reinstall \
             xz-utils build-essential libncurses5-dev libncursesw5-dev \
             flex bison libssl-dev bc dwarves \
-            crossbuild-essential-arm64 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            kmod cpio rsync libelf-dev debhelper fakeroot binutils-aarch64-linux-gnu patch git
-          
-          if ! aarch64-linux-gnu-gcc --version; then
-            echo "❌ 交叉编译器安装失败"
-            exit 1
-          fi
-          if ! patch --version; then
-            echo "❌ patch 工具安装失败"
-            exit 1
-          fi
-          echo "✅ 工具链安装验证通过，CPU 核心数：$(nproc)"
+            kmod cpio rsync libelf-dev debhelper fakeroot patch git
+          echo "✅ ARM64 原生编译依赖安装完成"
 
       - name: Create Working Directories
         run: |
@@ -99,7 +96,7 @@ jobs:
             exit 1
           fi
 
-          # 核心修复：初始化空 Git 仓库，满足 deb-pkg 强制要求
+          # 初始化空 Git 仓库，满足 deb-pkg 要求
           cd $KERNEL_SRC
           git init
           git config user.name "GitHub Actions"
@@ -117,6 +114,7 @@ jobs:
           cp ${{ github.workspace }}/$CUSTOM_CONFIG_FILE ./.config
           echo "✅ 已加载自定义配置：$CUSTOM_CONFIG_FILE"
 
+          # 单线程打补丁
           xz -d -c ${{ github.workspace }}/$RT_PATCH_FILE | patch -p1 --verbose
           if [ $? -eq 0 ] || [ $? -eq 1 ]; then
             echo "✅ RT 补丁应用成功（返回码：$?）"
@@ -132,31 +130,33 @@ jobs:
           sed -i 's/^CONFIG_HZ=.*/CONFIG_HZ=1000/' .config
           sed -i 's/^CONFIG_MODVERSIONS=.*/CONFIG_MODVERSIONS=n/' .config
           sed -i 's/^CONFIG_BUILD_DOCS=.*/CONFIG_BUILD_DOCS=n/' .config
-          # 禁用内核内部 Git 信息读取（辅助优化）
           sed -i 's/^# CONFIG_KERNEL_GIT_INFO is not set/CONFIG_KERNEL_GIT_INFO=n/' .config
 
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE olddefconfig
+          # 单线程补全配置
+          make ARCH=$ARCH olddefconfig
           echo "✅ 内核配置完成"
 
-      - name: Cross Compile RT Kernel (Multi-Thread - Auto Core Count)
+      - name: Native Compile RT Kernel (Multi-Thread)
         run: |
           set -e
           cd $KERNEL_SRC
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) Image modules dtbs
-          echo "✅ arm64 RT 内核多线程编译完成（使用 $(nproc) 核心）"
+          # 多线程原生编译，无需交叉编译器
+          make ARCH=$ARCH -j$(nproc) Image modules dtbs
+          echo "✅ ARM64 RT 内核多线程原生编译完成（使用 $(nproc) 核心）"
 
-      - name: Build arm64 Deb Package (Multi-Thread - Skip Git Check)
+      - name: Build ARM64 Deb Package (Native Multi-Thread)
         run: |
           set -e
           cd $KERNEL_SRC
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) \
+          # 原生打包 deb，无架构依赖问题
+          make ARCH=$ARCH -j$(nproc) \
             LOCALVERSION=$KERNEL_LOCALVERSION \
             KDEB_PKGVERSION=$KERNEL_VERSION$KERNEL_LOCALVERSION \
             KDEB_DEBARCH=arm64 \
             KBUILD_BUILD_VERSION=1 \
             deb-pkg
           cp $WORK_DIR/*.deb $DEB_OUTPUT/
-          echo "✅ deb 包多线程生成完成，文件列表："
+          echo "✅ ARM64 deb 包原生生成完成，文件列表："
           ls -la $DEB_OUTPUT/
 
       - name: Package Standalone Modules & Image (Single Thread)
@@ -165,7 +165,7 @@ jobs:
           cd $KERNEL_SRC
           MODULES_DIR=$DEB_OUTPUT/kernel-modules-$KERNEL_VERSION$KERNEL_LOCALVERSION
           mkdir -p $MODULES_DIR/lib/modules
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE INSTALL_MOD_PATH=$MODULES_DIR modules_install
+          make ARCH=$ARCH INSTALL_MOD_PATH=$MODULES_DIR modules_install
           tar -zcf $MODULES_DIR.tar.gz -C $DEB_OUTPUT $(basename $MODULES_DIR)
           rm -rf $MODULES_DIR
 
@@ -180,12 +180,12 @@ jobs:
           tar -zcf $IMG_DTB_DIR.tar.gz -C $DEB_OUTPUT $(basename $IMG_DTB_DIR)
           rm -rf $IMG_DTB_DIR
 
-          echo "✅ 独立包生成完成"
+          echo "✅ 独立模块和镜像包生成完成"
 
       - name: Upload All Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: RT-Kernel-OrangePi5Plus-arm64-$KERNEL_VERSION$KERNEL_LOCALVERSION
+          name: RT-Kernel-OrangePi5Plus-ARM64-Native-$KERNEL_VERSION$KERNEL_LOCALVERSION
           path: |
             ${{ env.DEB_OUTPUT }}/*.deb
             ${{ env.DEB_OUTPUT }}/*.tar.gz
