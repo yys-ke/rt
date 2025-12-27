@@ -1,4 +1,4 @@
-name: Cross Compile RT Kernel (Deb + Modules) for Orange Pi 5 Plus
+name: Cross Compile RT Kernel (Single Thread) for Orange Pi 5 Plus
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: cross-compile-rt-kernel
+  group: cross-compile-rt-kernel-single-thread
   cancel-in-progress: true
 
 jobs:
@@ -16,16 +16,13 @@ jobs:
       contents: read
       actions: write
     env:
-      # 你的文件配置
       CUSTOM_CONFIG_FILE: config-6.12.43-current-rockchip64
       RT_PATCH_FILE: patch-6.12.43-rt12.patch.xz
       KERNEL_SRC_URL: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/snapshot/linux-9becd7c25c61ae7e5b6fbfc3c226b1f23af7638c.tar.gz
       KERNEL_VERSION: 6.12.43
       KERNEL_LOCALVERSION: -rt12-opi5plus
-      # 交叉编译核心参数
       ARCH: arm64
       CROSS_COMPILE: aarch64-linux-gnu-
-      # 工作目录
       WORK_DIR: ${{ github.workspace }}/work
       KERNEL_SRC: ${{ github.workspace }}/kernel-src
       DEB_OUTPUT: ${{ github.workspace }}/kernel-deb-output
@@ -60,7 +57,6 @@ jobs:
             crossbuild-essential-arm64 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             kmod cpio rsync libelf-dev debhelper fakeroot binutils-aarch64-linux-gnu patch
           
-          # 验证编译器和 patch 工具
           if ! aarch64-linux-gnu-gcc --version; then
             echo "❌ 交叉编译器安装失败"
             exit 1
@@ -77,39 +73,53 @@ jobs:
           mkdir -p $WORK_DIR $KERNEL_SRC $DEB_OUTPUT
           echo "✅ 工作目录创建完成"
 
-      - name: Download & Extract Kernel Source
+      # ========== 修复后的下载解压步骤 ==========
+      - name: Download & Extract Kernel Source (Keep Original Filename)
         run: |
           set -e
           cd $WORK_DIR
-          wget -q $KERNEL_SRC_URL -O kernel-src.tar.gz
-          tar -xf kernel-src.tar.gz -C $KERNEL_SRC --strip-components=1
+          ORIGINAL_FILENAME="linux-9becd7c25c61ae7e5b6fbfc3c226b1f23af7638c.tar.gz"
+          echo "📥 开始下载源码：$KERNEL_SRC_URL"
+          wget --no-check-certificate \
+               --timeout=30 \
+               --tries=5 \
+               --continue \
+               --verbose \
+               $KERNEL_SRC_URL -O $ORIGINAL_FILENAME
+          
+          if [ ! -s "$ORIGINAL_FILENAME" ]; then
+            echo "❌ 源码下载失败，文件为空"
+            exit 1
+          fi
+          echo "✅ 源码下载完成，原文件名：$ORIGINAL_FILENAME，大小：$(du -h $ORIGINAL_FILENAME | awk '{print $1}')"
+
+          # 可选重命名，取消注释即可
+          # mv $ORIGINAL_FILENAME kernel-src.tar.gz
+          # ORIGINAL_FILENAME="kernel-src.tar.gz"
+
+          tar -xf $ORIGINAL_FILENAME -C $KERNEL_SRC --strip-components=1
           if [ ! -f "$KERNEL_SRC/Makefile" ]; then
             echo "❌ 内核源码解压失败"
+            ls -la $KERNEL_SRC
             exit 1
           fi
           echo "✅ 内核源码下载解压完成"
 
-      - name: Apply RT Patch & Load Custom Config (Fixed Patch Command)
+      - name: Apply RT Patch & Load Custom Config (No Multi-Thread)
         run: |
           set -e
           cd $KERNEL_SRC
-          # 1. 复制自定义配置
           cp ${{ github.workspace }}/$CUSTOM_CONFIG_FILE ./.config
           echo "✅ 已加载自定义配置：$CUSTOM_CONFIG_FILE"
 
-          # 2. 修复核心：原生 patch 命令不支持 -j 参数，直接用 -p1
-          # -p1：忽略补丁中的第一层目录（适配内核补丁格式）
-          # --verbose：打印补丁应用详情，方便排查问题
           xz -d -c ${{ github.workspace }}/$RT_PATCH_FILE | patch -p1 --verbose
           if [ $? -eq 0 ] || [ $? -eq 1 ]; then
-            # patch 返回 1 表示部分文件已存在（正常），返回 0 表示完全成功
             echo "✅ RT 补丁应用成功（返回码：$?）"
           else
             echo "❌ RT 补丁应用失败（返回码：$?）"
             exit 1
           fi
 
-          # 3. 强制开启 RT 配置
           echo "CONFIG_LOCALVERSION=\"$KERNEL_LOCALVERSION\"" >> .config
           sed -i 's/^# CONFIG_PREEMPT_RT is not set/CONFIG_PREEMPT_RT=y/' .config
           sed -i 's/^CONFIG_PREEMPT=.*/CONFIG_PREEMPT=y/' .config
@@ -117,22 +127,21 @@ jobs:
           sed -i 's/^CONFIG_MODVERSIONS=.*/CONFIG_MODVERSIONS=n/' .config
           sed -i 's/^CONFIG_BUILD_DOCS=.*/CONFIG_BUILD_DOCS=n/' .config
 
-          # 4. 单线程补全配置
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j1 olddefconfig
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE olddefconfig
           echo "✅ 内核配置完成"
 
-      - name: Cross Compile RT Kernel (Image + Modules + DTBs)
+      - name: Cross Compile RT Kernel (Single Thread Only)
         run: |
           set -e
           cd $KERNEL_SRC
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j2 Image modules dtbs
-          echo "✅ arm64 RT 内核交叉编译完成"
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE Image modules dtbs
+          echo "✅ arm64 RT 内核单线程编译完成"
 
-      - name: Build arm64 Deb Package
+      - name: Build arm64 Deb Package (Single Thread)
         run: |
           set -e
           cd $KERNEL_SRC
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j2 \
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE \
             LOCALVERSION=$KERNEL_LOCALVERSION \
             KDEB_PKGVERSION=$KERNEL_VERSION$KERNEL_LOCALVERSION \
             KDEB_DEBARCH=arm64 \
@@ -145,14 +154,12 @@ jobs:
         run: |
           set -e
           cd $KERNEL_SRC
-          # 打包模块
           MODULES_DIR=$DEB_OUTPUT/kernel-modules-$KERNEL_VERSION$KERNEL_LOCALVERSION
           mkdir -p $MODULES_DIR/lib/modules
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE INSTALL_MOD_PATH=$MODULES_DIR modules_install
           tar -zcf $MODULES_DIR.tar.gz -C $DEB_OUTPUT $(basename $MODULES_DIR)
           rm -rf $MODULES_DIR
 
-          # 打包镜像和设备树
           IMG_DTB_DIR=$DEB_OUTPUT/kernel-img-dtb-$KERNEL_VERSION$KERNEL_LOCALVERSION
           mkdir -p $IMG_DTB_DIR/boot
           cp arch/arm64/boot/Image $IMG_DTB_DIR/boot/
