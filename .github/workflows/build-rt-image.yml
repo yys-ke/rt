@@ -1,73 +1,85 @@
-name: Build 6.12.43 RT kernel deb (any branch)
+name: Build full offline bundle – OPi3B 6.1.115 + RT43
 
-on: push        # 任何分支都触发
+# 触发条件：任意分支 push + 手动按钮
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - '**'          # 匹配所有分支
+
+env:
+  ARMBIAN_VER: v26.2.0              # Armbian 版本
+  BOARD:       orangepi3b           # 板型
+  BRANCH:      vendor               # 与官方镜像同分支
+  RELEASE:     trixie               # 与官方镜像同发行版
+  KERNEL_TAG:  v6.1.115             # 内核版本
+  PATCH_FILE:  patch-6.1.112-rt43.patch.xz   # RT 补丁文件名
 
 jobs:
-  kernel:
-    runs-on: ubuntu-22.04
+  offline:
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
+      # ---------- 1. 清理磁盘 ----------
+      - name: Maximize disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache
+          sudo apt-get clean
+          df -h
+
+      # ---------- 2. 检出 Armbian 构建框架 ----------
+      - name: Checkout Armbian
         uses: actions/checkout@v4
+        with:
+          repository: armbian/build
+          ref:        ${{ env.ARMBIAN_VER }}
+          path:       build
 
-      - name: 安装依赖
+      # ---------- 3. 检出补丁仓库（含 RT 补丁） ----------
+      - name: Checkout patches repo
+        uses: actions/checkout@v4
+        with:
+          path: patches
+
+      # ---------- 4. 放置 RT 补丁 ----------
+      - name: Install RT patch
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            git curl wget unzip build-essential debhelper \
-            crossbuild-essential-arm64 qemu-user-static ccache rsync \
-            libncurses5-dev flex bison libssl-dev bc dwarves python3-distutils xz-utils ca-certificates
+          mkdir -p build/userpatches
+          xzcat patches/${{ env.PATCH_FILE }} \
+               > build/userpatches/kernel-rt.patch
+          cat <<EOF > build/userpatches/lib.config
+          LINUXFAMILY=rockchip64
+          KERNELBRANCH='branch:linux-6.1.y'
+          KERNELTAG='${{ env.KERNEL_TAG }}'
+          KERNEL_PATCHES='userpatches/kernel-rt.patch'
+          EOF
 
-      - name: 拉取 Armbian 源码
-        run: git clone --depth 1 --branch v25.08 https://github.com/armbian/build.git armbian
-
-      - name: 放入用户补丁（强制哈希变化）
+      # ---------- 5. 安装依赖 ----------
+      - name: Install build deps
         run: |
-          mkdir -p armbian/userpatches
-          # 1. 跳过 trixie 缺失包
-          cp lib.config armbian/userpatches/lib.config
-          # 2. 关闭 MODVERSIONS（改名避开保留字）
-          echo 'CONFIG_MODVERSIONS=n' > armbian/userpatches/config-rt.conf
-          # 3. 必过空补丁：改版权年份，强制官方源码哈希变化
-          printf '--- a/init/init_main.c\n+++ b/init/init_main.c\n@@ -1,4 +1,4 @@\n-// SPDX-License-Identifier: GPL-2.0-only\n+// SPDX-License-Identifier: GPL-2.0-or-later\n /*\n  *  linux/init/init_main.c\n  */\n' > armbian/userpatches/kernel/rockchip-rk3588-6.12/bump-hash.patch
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc-aarch64-linux-gnu \
+            libncurses-dev libssl-dev bc bison flex dwarves zstd
 
-      - name: 打入 RT 补丁
+      # ---------- 6. 下载完整源码（含工具链） ----------
+      - name: Download sources
+        working-directory: build
         run: |
-          mkdir -p armbian/userpatches/kernel/rockchip-rk3588-6.12
-          xz -d < patch-6.12.43-rt12.patch.xz > armbian/userpatches/kernel/rockchip-rk3588-6.12/rt12.patch
+          ./compile.sh BOARD=${{ env.BOARD }}  BRANCH=${{ env.BRANCH }} \
+                        RELEASE=${{ env.RELEASE }} \
+                        BUILD_ONLY=kernel DOWNLOAD_ONLY=yes
 
-      - name: 验证空补丁是否已应用
+      # ---------- 7. 打包完整离线包 ----------
+      - name: Create full offline bundle
         run: |
-          cd armbian
-          # 等待源码拉取完成（最多 5 分钟）
-          for i in {1..60}; do
-            [ -f cache/sources/linux-*/init/init_main.c ] && break || sleep 5
-          done
-          grep -F "GPL-2.0-or-later" cache/sources/linux-*/init/init_main.c && echo "✅ patch applied" || (echo "❌ patch missing"; exit 1)
+          tar -C .. -cf - \
+             build  cache  output \
+            | zstd -19 > full-offline-opi3b-6.1.115-rt43.tar.zst
+          ls -lh full-offline-opi3b-6.1.115-rt43.tar.zst
 
-      - name: 编译 6.12.43 RT 内核
-        run: |
-          cd armbian
-          ./compile.sh kernel \
-            BOARD=orangepi5-plus \
-            BRANCH=current \
-            RELEASE=bookworm \
-            KERNEL_CONFIGURE=prebuilt \
-            USERPATCHES_ID=rt \
-            ARMBIAN_CACHE_MODE=none \
-            USE_CCACHE=yes \
-            CCACHE_DIR=$GITHUB_WORKSPACE/ccache
-
-      - name: 上传内核 deb 包
+      # ---------- 8. 上传 ----------
+      - name: Upload bundle
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-6.12.43-rt-debs-${{ github.ref_name }}-${{ github.run_number }}
-          path: armbian/output/debs/*.deb
-          retention-days: 90
-
-      - name: 上传日志（失败时）
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel-logs-${{ github.ref_name }}-${{ github.run_number }}
-          path: armbian/output/logs/
+          name: full-offline-opi3b-6.1.115-rt43
+          path: full-offline-opi3b-6.1.115-rt43.tar.zst
           retention-days: 7
