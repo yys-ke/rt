@@ -60,13 +60,17 @@ jobs:
           sudo apt-get install -y build-essential gcc-aarch64-linux-gnu \
             libncurses-dev libssl-dev bc bison flex dwarves zstd
 
-      # ---------- 6. 下载完整源码 ----------
+      # ---------- 6. 下载完整源码（非交互） ----------
       - name: Download sources
         working-directory: build
         run: |
-          ./compile.sh BOARD=${{ env.BOARD }}  BRANCH=${{ env.BRANCH }} \
-                        RELEASE=${{ env.RELEASE }} \
-                        BUILD_ONLY=kernel DOWNLOAD_ONLY=yes
+          ./compile.sh \
+            BOARD=${{ env.BOARD }} \
+            BRANCH=${{ env.BRANCH }} \
+            RELEASE=${{ env.RELEASE }} \
+            BUILD_ONLY=kernel \
+            DOWNLOAD_ONLY=yes \
+            KERNEL_CONFIGURE=no
 
       # ---------- 7. 打包完整离线包 ----------
       - name: Create full offline bundle
