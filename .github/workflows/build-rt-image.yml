@@ -72,17 +72,19 @@ jobs:
             BUILD_DESKTOP=no \
             BUILD_MINIMAL=yes
 
-      # ---------- 6b. 容器内打印真实目录 ----------
+      # ---------- 6b. 容器内打印真实目录（修正路径） ----------
       - name: List dirs inside Docker
         if: always()
         working-directory: build
         run: |
-          echo "=== Container /armbian ================================="
-          ls -la /armbian
-          echo "=== Container /armbian/cache ==========================="
-          ls -la /armbian/cache || true
-          echo "=== Container /armbian/output =========================="
-          ls -la /armbian/output || true
+          echo "=== Container PWD ================================="
+          pwd
+          echo "=== Container $(pwd) ==============================="
+          ls -la ..
+          echo "=== Container cache ================================="
+          ls -la ../cache || true
+          echo "=== Container output ================================="
+          ls -la ../output || true
 
       # ---------- 7. 检查宿主机目录 ----------
       - name: Check host dirs after download
