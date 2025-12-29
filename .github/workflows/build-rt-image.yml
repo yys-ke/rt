@@ -1,6 +1,5 @@
 name: Build full offline bundle – OPi3B 6.1.115 + RT43
 
-# 任意分支 push 即触发
 on:
   workflow_dispatch:
   push:
@@ -8,11 +7,11 @@ on:
       - '**'
 
 env:
-  ARMBIAN_VER: v26.2.0-trunk.114     # 真实存在 tag
+  ARMBIAN_VER: v26.2.0-trunk.114
   BOARD:       orangepi3b
-  BRANCH:      current               # 改为 current（配置齐全）
-  RELEASE:     trixie                # 与官方镜像同发行版
-  KERNEL_TAG:  v6.1.115              # 图上存在的 tag
+  BRANCH:      current               # 配置齐全
+  RELEASE:     trixie
+  KERNEL_TAG:  v6.1.115
   PATCH_FILE:  patch-6.1.112-rt43.patch.xz
 
 jobs:
@@ -44,15 +43,14 @@ jobs:
       - name: Install RT patch
         run: |
           mkdir -p build/userpatches
-          xzcat patches/${{ env.PATCH_FILE }} \
-               > build/userpatches/kernel-rt.patch
+          xzcat patches/${{ env.PATCH_FILE }} > build/userpatches/kernel-rt.patch
           cat <<EOF > build/userpatches/lib.config
           LINUXFAMILY=rockchip64
           KERNELTAG='${{ env.KERNEL_TAG }}'
           KERNEL_PATCHES='userpatches/kernel-rt.patch'
           EOF
 
-      # ---------- 5. 安装依赖（含 qemu-user-static） ----------
+      # ---------- 5. 安装依赖 ----------
       - name: Install build deps
         run: |
           sudo apt-get update
@@ -60,7 +58,7 @@ jobs:
             libncurses-dev libssl-dev bc bison flex dwarves zstd \
             qemu-user-static
 
-      # ---------- 6. 下载完整源码（非交互） ----------
+      # ---------- 6. 下载完整源码 ----------
       - name: Download sources
         working-directory: build
         run: |
@@ -74,10 +72,10 @@ jobs:
             BUILD_DESKTOP=no \
             BUILD_MINIMAL=yes
 
-      # ---------- 7. 打包完整离线包 ----------
+      # ---------- 7. 打包（宿主机执行，路径正确） ----------
       - name: Create full offline bundle
         run: |
-          tar -C .. -cf - \
+          tar -C "$GITHUB_WORKSPACE" -cf - \
              build  cache  output \
             | zstd -19 > full-offline-opi3b-6.1.115-rt43.tar.zst
           ls -lh full-offline-opi3b-6.1.115-rt43.tar.zst
