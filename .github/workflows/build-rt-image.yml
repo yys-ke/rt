@@ -1,6 +1,5 @@
 name: Build full offline bundle – OPi3B 6.1.115 + RT43
 
-# 任意分支 push 即触发
 on:
   workflow_dispatch:
   push:
@@ -10,7 +9,7 @@ on:
 env:
   ARMBIAN_VER: v26.2.0-trunk.114
   BOARD:       orangepi3b
-  BRANCH:      edge                # 配置齐全
+  BRANCH:      edge
   RELEASE:     trixie
   KERNEL_TAG:  v6.1.115
   PATCH_FILE:  patch-6.1.112-rt43.patch.xz
@@ -73,11 +72,28 @@ jobs:
             BUILD_DESKTOP=no \
             BUILD_MINIMAL=yes
 
-      # ---------- 7. 等容器结束后在宿主机打包 ----------
-      - name: Pack offline bundle (host)
+      # ---------- 7. 检查宿主机到底有啥 ----------
+      - name: Check host dirs after download
         if: always()
         run: |
-          # 排除锁文件，避免权限错误
+          echo "=== PWD ================================="
+          pwd
+          echo "=== GITHUB_WORKSPACE ===================="
+          ls -la "$GITHUB_WORKSPACE"
+          echo "=== build/ ==============================="
+          ls -la build || true
+          echo "=== cache/ ==============================="
+          ls -la cache || true
+          echo "=== output/ =============================="
+          ls -la output || true
+
+      # ---------- 8. 宿主机 tar（若目录存在） ----------
+      - name: Pack on host (if dirs present)
+        if: always()
+        continue-on-error: true
+        id:  host_tar
+        run: |
+          # 正常三目录全打
           tar --exclude='cache/aptcache/*/lock' \
               --exclude='cache/aptcache/*/partial' \
               -C "$GITHUB_WORKSPACE" \
@@ -85,7 +101,21 @@ jobs:
             | zstd -19 > full-offline-opi3b-6.1.115-rt43.tar.zst
           ls -lh full-offline-opi3b-6.1.115-rt43.tar.zst
 
-      # ---------- 8. 上传 ----------
+      # ---------- 9. 容器内 tar + 拷出（宿主机失败时兜底） ----------
+      - name: Pack inside Docker (fallback)
+        if: always() && steps.host_tar.outcome == 'failure'
+        working-directory: build
+        run: |
+          # 在容器里打包，然后 mv 到 /tmp 让宿主机拿到
+          tar --exclude='cache/aptcache/*/lock' \
+              --exclude='cache/aptcache/*/partial' \
+              -C /armbian \
+              -cf - build cache output \
+            | zstd -19 > /tmp/offline.tar.zst
+          sudo mv /tmp/offline.tar.zst "$GITHUB_WORKSPACE"/full-offline-opi3b-6.1.115-rt43.tar.zst
+          ls -lh "$GITHUB_WORKSPACE"/full-offline-opi3b-6.1.115-rt43.tar.zst
+
+      # ---------- 10. 上传 ----------
       - name: Upload bundle
         if: always()
         uses: actions/upload-artifact@v4
