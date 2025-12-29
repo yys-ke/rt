@@ -1,5 +1,6 @@
 name: Build full offline bundle – OPi3B 6.1.115 + RT43
 
+# 任意分支 push 即触发
 on:
   workflow_dispatch:
   push:
@@ -58,7 +59,7 @@ jobs:
             libncurses-dev libssl-dev bc bison flex dwarves zstd \
             qemu-user-static
 
-      # ---------- 6. 下载完整源码 ----------
+      # ---------- 6. 下载完整源码（容器内） ----------
       - name: Download sources
         working-directory: build
         run: |
@@ -72,16 +73,21 @@ jobs:
             BUILD_DESKTOP=no \
             BUILD_MINIMAL=yes
 
-      # ---------- 7. 打包（宿主机执行，路径正确） ----------
-      - name: Create full offline bundle
+      # ---------- 7. 等容器结束后在宿主机打包 ----------
+      - name: Pack offline bundle (host)
+        if: always()
         run: |
-          tar -C "$GITHUB_WORKSPACE" -cf - \
-             build  cache  output \
+          # 排除锁文件，避免权限错误
+          tar --exclude='cache/aptcache/*/lock' \
+              --exclude='cache/aptcache/*/partial' \
+              -C "$GITHUB_WORKSPACE" \
+              -cf - build cache output \
             | zstd -19 > full-offline-opi3b-6.1.115-rt43.tar.zst
           ls -lh full-offline-opi3b-6.1.115-rt43.tar.zst
 
       # ---------- 8. 上传 ----------
       - name: Upload bundle
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: full-offline-opi3b-6.1.115-rt43
