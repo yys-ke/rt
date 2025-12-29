@@ -12,7 +12,7 @@ env:
   BOARD:       orangepi3b
   BRANCH:      vendor                # 与官方镜像同分支
   RELEASE:     trixie                # 与官方镜像同发行版
-  KERNEL_TAG:  v6.1.115
+  KERNEL_TAG:  v6.1.115              # 图上存在的 tag
   PATCH_FILE:  patch-6.1.112-rt43.patch.xz
 
 jobs:
@@ -48,7 +48,6 @@ jobs:
                > build/userpatches/kernel-rt.patch
           cat <<EOF > build/userpatches/lib.config
           LINUXFAMILY=rockchip64
-          KERNELBRANCH='branch:linux-6.1.y'
           KERNELTAG='${{ env.KERNEL_TAG }}'
           KERNEL_PATCHES='userpatches/kernel-rt.patch'
           EOF
