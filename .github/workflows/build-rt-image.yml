@@ -1,19 +1,19 @@
 name: Build full offline bundle – OPi3B 6.1.115 + RT43
 
-# 触发条件：任意分支 push + 手动按钮
+# 任意分支 push 即触发
 on:
   workflow_dispatch:
   push:
     branches:
-      - '**'          # 匹配所有分支
+      - '**'
 
 env:
-  ARMBIAN_VER: v26.2.0              # Armbian 版本
-  BOARD:       orangepi3b           # 板型
-  BRANCH:      vendor               # 与官方镜像同分支
-  RELEASE:     trixie               # 与官方镜像同发行版
-  KERNEL_TAG:  v6.1.115             # 内核版本
-  PATCH_FILE:  patch-6.1.112-rt43.patch.xz   # RT 补丁文件名
+  ARMBIAN_VER: v26.2.0-trunk.114     # 真实存在 tag
+  BOARD:       orangepi3b
+  BRANCH:      vendor                # 与官方镜像同分支
+  RELEASE:     trixie                # 与官方镜像同发行版
+  KERNEL_TAG:  v6.1.115
+  PATCH_FILE:  patch-6.1.112-rt43.patch.xz
 
 jobs:
   offline:
@@ -34,7 +34,7 @@ jobs:
           ref:        ${{ env.ARMBIAN_VER }}
           path:       build
 
-      # ---------- 3. 检出补丁仓库（含 RT 补丁） ----------
+      # ---------- 3. 检出补丁仓库 ----------
       - name: Checkout patches repo
         uses: actions/checkout@v4
         with:
@@ -60,7 +60,7 @@ jobs:
           sudo apt-get install -y build-essential gcc-aarch64-linux-gnu \
             libncurses-dev libssl-dev bc bison flex dwarves zstd
 
-      # ---------- 6. 下载完整源码（含工具链） ----------
+      # ---------- 6. 下载完整源码 ----------
       - name: Download sources
         working-directory: build
         run: |
