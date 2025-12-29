@@ -53,12 +53,13 @@ jobs:
           KERNEL_PATCHES='userpatches/kernel-rt.patch'
           EOF
 
-      # ---------- 5. 安装依赖 ----------
+      # ---------- 5. 安装依赖（含 qemu-user-static） ----------
       - name: Install build deps
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential gcc-aarch64-linux-gnu \
-            libncurses-dev libssl-dev bc bison flex dwarves zstd
+            libncurses-dev libssl-dev bc bison flex dwarves zstd \
+            qemu-user-static
 
       # ---------- 6. 下载完整源码（非交互） ----------
       - name: Download sources
