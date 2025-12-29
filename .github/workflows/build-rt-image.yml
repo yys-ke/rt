@@ -70,7 +70,9 @@ jobs:
             RELEASE=${{ env.RELEASE }} \
             BUILD_ONLY=kernel \
             DOWNLOAD_ONLY=yes \
-            KERNEL_CONFIGURE=no
+            KERNEL_CONFIGURE=no \
+            BUILD_DESKTOP=no \
+            BUILD_MINIMAL=yes
 
       # ---------- 7. 打包完整离线包 ----------
       - name: Create full offline bundle
