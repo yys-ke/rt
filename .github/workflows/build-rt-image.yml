@@ -10,7 +10,7 @@ on:
 env:
   ARMBIAN_VER: v26.2.0-trunk.114     # 真实存在 tag
   BOARD:       orangepi3b
-  BRANCH:      vendor                # 与官方镜像同分支
+  BRANCH:      current               # 改为 current（配置齐全）
   RELEASE:     trixie                # 与官方镜像同发行版
   KERNEL_TAG:  v6.1.115              # 图上存在的 tag
   PATCH_FILE:  patch-6.1.112-rt43.patch.xz
