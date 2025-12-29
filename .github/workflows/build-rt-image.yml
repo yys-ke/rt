@@ -10,7 +10,7 @@ on:
 env:
   ARMBIAN_VER: v26.2.0-trunk.114
   BOARD:       orangepi3b
-  BRANCH:      current               # 配置齐全
+  BRANCH:      edge                # 配置齐全
   RELEASE:     trixie
   KERNEL_TAG:  v6.1.115
   PATCH_FILE:  patch-6.1.112-rt43.patch.xz
