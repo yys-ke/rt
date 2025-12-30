@@ -1,4 +1,4 @@
-name: Build full offline bundle – OPi3B 6.1.115 + RT43
+name: Build offline – OPi3B vendor（本地 config）
 
 on:
   workflow_dispatch:
@@ -9,23 +9,22 @@ on:
 env:
   ARMBIAN_VER: v26.2.0-trunk.114
   BOARD:       orangepi3b
-  BRANCH:      edge
+  BRANCH:      vendor                     # ① 用 vendor 分支
   RELEASE:     trixie
-  KERNEL_TAG:  v6.1.115
+  # KERNEL_TAG  去掉，用 vendor 最新
   PATCH_FILE:  patch-6.1.112-rt43.patch.xz
+  CONFIG_FILE: config-6.1.115-vendor-rk35xx  # ② 本地 config 文件名
 
 jobs:
   offline:
     runs-on: ubuntu-latest
     steps:
-      # ---------- 1. 清理磁盘 ----------
       - name: Maximize disk space
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache
           sudo apt-get clean
           df -h
 
-      # ---------- 2. 检出 Armbian 构建框架 ----------
       - name: Checkout Armbian
         uses: actions/checkout@v4
         with:
@@ -33,24 +32,28 @@ jobs:
           ref:        ${{ env.ARMBIAN_VER }}
           path:       build
 
-      # ---------- 3. 检出补丁仓库 ----------
       - name: Checkout patches repo
         uses: actions/checkout@v4
         with:
           path: patches
 
-      # ---------- 4. 放置 RT 补丁 ----------
-      - name: Install RT patch
+      # ③ 放置 RT 补丁 + 本地 vendor config
+      - name: Install RT patch & vendor config
         run: |
-          mkdir -p build/userpatches
+          mkdir -p build/userpatches/kernel
           xzcat patches/${{ env.PATCH_FILE }} > build/userpatches/kernel-rt.patch
+          # 把本地 config 放进 userpatches/kernel/
+          cp "$GITHUB_WORKSPACE"/${{ env.CONFIG_FILE }} build/userpatches/kernel/linux-rockchip64-vendor.config
           cat <<EOF > build/userpatches/lib.config
           LINUXFAMILY=rockchip64
-          KERNELTAG='${{ env.KERNEL_TAG }}'
+          # 用 vendor 最新 tag，不指定 KERNELTAG
           KERNEL_PATCHES='userpatches/kernel-rt.patch'
+          KERNEL_CONFIG_NAME=linux-rockchip64-vendor   # 告诉 Armbian 用这份 config
+          # 强制 cache/output 写到宿主机同级目录，方便打包
+          ARMBIAN_CACHE_DIR="$GITHUB_WORKSPACE/cache"
+          ARMBIAN_OUTPUT_DIR="$GITHUB_WORKSPACE/output"
           EOF
 
-      # ---------- 5. 安装依赖 ----------
       - name: Install build deps
         run: |
           sudo apt-get update
@@ -58,7 +61,6 @@ jobs:
             libncurses-dev libssl-dev bc bison flex dwarves zstd \
             qemu-user-static
 
-      # ---------- 6. 下载完整源码（容器内） ----------
       - name: Download sources
         working-directory: build
         run: |
@@ -72,51 +74,20 @@ jobs:
             BUILD_DESKTOP=no \
             BUILD_MINIMAL=yes
 
-      # ---------- 6b. 容器内打印真实目录（修正路径） ----------
-      - name: List dirs inside Docker
-        if: always()
-        working-directory: build
-        run: |
-          echo "=== Container PWD ================================="
-          pwd
-          echo "=== Container $(pwd) ==============================="
-          ls -la ..
-          echo "=== Container cache ================================="
-          ls -la ../cache || true
-          echo "=== Container output ================================="
-          ls -la ../output || true
-
-      # ---------- 7. 检查宿主机目录 ----------
-      - name: Check host dirs after download
-        if: always()
-        run: |
-          echo "=== PWD ================================="
-          pwd
-          echo "=== GITHUB_WORKSPACE ===================="
-          ls -la "$GITHUB_WORKSPACE"
-          echo "=== build/ ==============================="
-          ls -la build || true
-          echo "=== cache/ ==============================="
-          ls -la cache || true
-          echo "=== output/ =============================="
-          ls -la output || true
-
-      # ---------- 8. 宿主机打包（留作对比，不改动） ----------
-      - name: Pack offline bundle (host)
+      - name: Pack offline bundle
         if: always()
         run: |
           tar --exclude='cache/aptcache/*/lock' \
               --exclude='cache/aptcache/*/partial' \
               -C "$GITHUB_WORKSPACE" \
               -cf - build cache output \
-            | zstd -19 > full-offline-opi3b-6.1.115-rt43.tar.zst
-          ls -lh full-offline-opi3b-6.1.115-rt43.tar.zst
+            | zstd -19 > full-offline-opi3b-vendor-local.tar.zst
+          ls -lh full-offline-opi3b-vendor-local.tar.zst
 
-      # ---------- 9. 上传 ----------
       - name: Upload bundle
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: full-offline-opi3b-6.1.115-rt43
-          path: full-offline-opi3b-6.1.115-rt43.tar.zst
+          name: full-offline-opi3b-vendor-local
+          path: full-offline-opi3b-vendor-local.tar.zst
           retention-days: 7
