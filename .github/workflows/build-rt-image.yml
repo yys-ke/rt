@@ -9,11 +9,11 @@ on:
 env:
   ARMBIAN_VER: v26.2.0-trunk.114
   BOARD:       orangepi3b
-  BRANCH:      vendor                     # ① 用 vendor 分支
+  BRANCH:      vendor                     # 用 vendor 分支
   RELEASE:     trixie
   # KERNEL_TAG  去掉，用 vendor 最新
   PATCH_FILE:  patch-6.1.112-rt43.patch.xz
-  CONFIG_FILE: config-6.1.115-vendor-rk35xx  # ② 本地 config 文件名
+  CONFIG_FILE: config-6.1.115-vendor-rk35xx  # 本地 config 文件名
 
 jobs:
   offline:
@@ -37,13 +37,17 @@ jobs:
         with:
           path: patches
 
-      # ③ 放置 RT 补丁 + 本地 vendor config
+      # 放置 RT 补丁 + 本地 vendor config（带存在校验）
       - name: Install RT patch & vendor config
         run: |
           mkdir -p build/userpatches/kernel
           xzcat patches/${{ env.PATCH_FILE }} > build/userpatches/kernel-rt.patch
-          # 把本地 config 放进 userpatches/kernel/
-          cp "$GITHUB_WORKSPACE"/${{ env.CONFIG_FILE }} build/userpatches/kernel/linux-rockchip64-vendor.config
+          # 显式检查文件是否存在
+          ls -la "$GITHUB_WORKSPACE"
+          file "$GITHUB_WORKSPACE/${{ env.CONFIG_FILE }}"
+          # 复制本地 config
+          cp "$GITHUB_WORKSPACE/${{ env.CONFIG_FILE }}" \
+             build/userpatches/kernel/linux-rockchip64-vendor.config
           cat <<EOF > build/userpatches/lib.config
           LINUXFAMILY=rockchip64
           # 用 vendor 最新 tag，不指定 KERNELTAG
